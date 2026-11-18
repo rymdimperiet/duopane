@@ -20,6 +20,13 @@ impl App {
         egui::TopBottomPanel::bottom("keys")
             .frame(egui::Frame::default().fill(theme::c().header).inner_margin(egui::Margin::symmetric(8, 4)))
             .show(ctx, |ui| {
+                // Holding Alt, Shift or Ctrl shows what the F-keys do with that key,
+                // like Double Commander's function-key bar.
+                let m = ui.input(|i| i.modifiers);
+                if m.alt || m.shift || m.ctrl || m.command {
+                    self.modifier_key_bar(ui, m);
+                    return;
+                }
                 ui.horizontal_wrapped(|ui| {
                     let keys: [(&str, &str, &'static str); 10] = [
                         ("F2", "Rename", "rename"),
@@ -43,6 +50,45 @@ impl App {
                 });
             });
 
+    }
+
+    /// The function-key bar while a modifier key is held: every F-key that has a
+    /// command with exactly these modifiers (from the current key bindings).
+    fn modifier_key_bar(&mut self, ui: &mut egui::Ui, m: egui::Modifiers) {
+        use crate::app::CmdRef;
+        use crate::commands::Shortcut;
+        use egui::Key;
+        const F_KEYS: [Key; 12] =
+            [Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F10, Key::F11, Key::F12];
+        let mut entries: Vec<(String, String, CmdRef)> = Vec::new();
+        for key in F_KEYS {
+            let sc = Shortcut::from_event(key, m);
+            if let Some(&cmd) = self.bindings.get(&sc) {
+                let label = match cmd {
+                    CmdRef::Builtin(i) => short_label(self.commands[i].id).map(str::to_string).unwrap_or_else(|| {
+                        self.commands[i].title.trim_end_matches('…').to_string()
+                    }),
+                    CmdRef::Custom(i) => self.settings.custom_commands.get(i).map(|c| c.title.clone()).unwrap_or_default(),
+                };
+                entries.push((sc.label(), label, cmd));
+            }
+        }
+        let th = theme::c();
+        ui.horizontal_wrapped(|ui| {
+            if entries.is_empty() {
+                let held = Shortcut { key: Key::F1, ctrl: m.ctrl || m.command, shift: m.shift, alt: m.alt }.label();
+                let held = held.trim_end_matches("F1").trim_end_matches('+');
+                ui.label(egui::RichText::new(format!("No F-key commands with {held}")).color(th.dim).small());
+                return;
+            }
+            for (k, label, cmd) in entries {
+                ui.label(egui::RichText::new(k).color(th.dim).small());
+                if ui.add(egui::Button::new(label).small()).clicked() {
+                    self.actions.push(Action::Run(cmd));
+                }
+                ui.add_space(8.0);
+            }
+        });
     }
 
     /// Messages, progress of file operations and the name search.
@@ -455,4 +501,30 @@ fn columns(rect: egui::Rect, w: &ColWidths) -> (egui::Rect, egui::Rect, egui::Re
     let size = egui::Rect::from_min_max(pos2(size_left, rect.top()), pos2(date_left, rect.bottom()));
     let date = egui::Rect::from_min_max(pos2(date_left, rect.top()), pos2(rect.right() - 6.0, rect.bottom()));
     (name, size, date)
+}
+
+/// Short names for the function-key bar (other commands use their title).
+fn short_label(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "help" => "Help",
+        "rename" => "Rename",
+        "view" => "View",
+        "edit" => "Edit",
+        "copy" => "Copy",
+        "move" => "Move",
+        "new_folder" => "New folder",
+        "new_file" => "New file",
+        "delete" => "Trash",
+        "delete_permanently" => "Delete",
+        "pack" => "Pack",
+        "unpack" => "Unpack",
+        "open_terminal" => "Terminal",
+        "quit" => "Quit",
+        "appearance" => "Appearance",
+        "sort_name" => "Sort: name",
+        "sort_extension" => "Sort: type",
+        "sort_modified" => "Sort: date",
+        "sort_size" => "Sort: size",
+        _ => return None,
+    })
 }

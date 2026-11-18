@@ -65,6 +65,9 @@ The finished program is `target/release/duopane`. Copy it anywhere on your `PATH
 | F12 | **Appearance**: colour scheme, fonts, text size, striped rows, the “..” row |
 | F1 | List every shortcut |
 
+Hold Alt, Shift or Ctrl to see what the F-keys do with that key in the bar at
+the bottom (for example Alt: Pack and Unpack; Ctrl: the sort keys).
+
 The mouse works too: click, Ctrl+click and Shift+click select, a double-click opens,
 right-click opens a menu, and clicking a column header sorts by it.
 
