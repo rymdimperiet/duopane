@@ -1,0 +1,51 @@
+//! Duopane: a keyboard-driven dual-pane file manager.
+//!
+//! Module map (start reading here if you want to change something):
+//! - `app.rs`      – app state, the per-frame loop and keyboard handling
+//! - `actions.rs`  – what each command does (copy, rename, go to, ...)
+//! - `ui.rs`       – drawing the two panes and the bottom bars
+//! - `dialogs.rs`  – pop-up dialogs, "Go to" and the command palette
+//! - `commands.rs` – every command and its default shortcut (add your own here)
+//! - `pane.rs`     – one folder listing: entries, cursor, selection, sorting, history
+//! - `fs_ops.rs`   – copy / move / delete / pack / unpack, run in the background with progress
+//! - `archive.rs`  – ZIP and TAR(.GZ) packing, unpacking and listing
+//! - `settings.rs` – the settings file (paths, bookmarks, key bindings, custom commands)
+//! - `lister.rs`   – the F3 viewer (text, pictures, PDF, music, video); loading in
+//!                   `lister_load.rs`, playback in `media.rs`
+//! - `fuzzy.rs`    – the fuzzy matcher used by "Go to" and the command palette
+//! - `theme.rs`    – colour schemes, fonts and sizes
+
+mod actions;
+mod app;
+mod archive;
+mod commands;
+mod dialogs;
+mod fs_ops;
+mod lister;
+mod lister_load;
+mod media;
+mod fuzzy;
+mod pane;
+mod settings;
+mod theme;
+mod ui;
+
+fn main() -> eframe::Result<()> {
+    // Optional: `duopane <left folder> [right folder]`
+    let args: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
+
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("Duopane")
+            .with_app_id("duopane")
+            .with_inner_size([1200.0, 760.0])
+            .with_min_inner_size([640.0, 360.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Duopane",
+        options,
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, args)))),
+    )
+}

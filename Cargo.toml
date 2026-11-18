@@ -1,0 +1,35 @@
+[package]
+name = "duopane"
+version = "0.1.0"
+edition = "2021"
+description = "A fast, keyboard-driven dual-pane file manager written in Rust"
+license = "MIT"
+readme = "README.md"
+keywords = ["file-manager", "dual-pane", "commander", "egui"]
+categories = ["filesystem", "gui"]
+rust-version = "1.82"
+default-run = "duopane"
+
+[dependencies]
+eframe = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+open = "5"
+trash = "5"
+chrono = "0.4"
+# Lister (F3): pictures, code colouring, Office text, sound
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "tiff", "webp", "pnm", "tga", "qoi"] }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Pack / unpack (Alt+F5 / Alt+F9)
+tar = "0.4"
+flate2 = "1"
+rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
+# Appearance: list and load the fonts installed on the system
+fontdb = "0.23"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

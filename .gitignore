@@ -1,0 +1,6 @@
+# Build output
+/target
+
+# Not part of the app: the website copy used by the Craft Anything builder
+/dist/
+/site/

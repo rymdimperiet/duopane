@@ -1,0 +1,586 @@
+//! Pop-up dialogs: text input, confirmations, messages and the
+//! searchable list used by "Go to" and the command palette.
+
+use crate::app::{expand_tilde, subdirs, tilde, Action, App, CmdRef, Modal};
+use crate::fs_ops::JobSpec;
+use crate::fuzzy;
+use crate::theme;
+use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Modifiers, Sense};
+use std::path::{Path, PathBuf};
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum PaletteKind {
+    Commands,
+    GoTo,
+}
+
+#[derive(Clone)]
+pub enum PaletteTarget {
+    Cmd(CmdRef),
+    Dir(PathBuf),
+}
+
+#[derive(Clone)]
+pub struct PaletteItem {
+    pub title: String,
+    pub detail: String,
+    pub target: PaletteTarget,
+    pub boost: i32,
+}
+
+pub struct PaletteState {
+    kind: PaletteKind,
+    query: String,
+    computed_for: Option<String>,
+    selected: usize,
+    first: bool,
+    base: Vec<PaletteItem>,
+    shown: Vec<PaletteItem>,
+}
+
+impl PaletteState {
+    pub fn new(kind: PaletteKind, base: Vec<PaletteItem>) -> Self {
+        PaletteState { kind, query: String::new(), computed_for: None, selected: 0, first: true, base, shown: Vec::new() }
+    }
+
+    /// Re-ranks the list when the query changed.
+    fn refresh(&mut self) {
+        if self.computed_for.as_deref() == Some(self.query.as_str()) {
+            return;
+        }
+        let q = self.query.trim().to_string();
+        self.computed_for = Some(self.query.clone());
+        self.selected = 0;
+        if self.kind == PaletteKind::GoTo && (q.starts_with('/') || q.starts_with('~')) {
+            self.shown = complete_path(&q);
+            return;
+        }
+        if q.is_empty() && self.kind == PaletteKind::Commands {
+            self.shown = self.base.clone();
+            return;
+        }
+        let mut scored: Vec<(i32, &PaletteItem)> = self
+            .base
+            .iter()
+            .filter_map(|item| {
+                let s = if self.kind == PaletteKind::GoTo {
+                    let a = fuzzy::score(&q, &item.title).map(|s| s + 40);
+                    let b = fuzzy::score(&q, &item.detail);
+                    a.max(b)?
+                } else {
+                    fuzzy::score(&q, &item.title)?
+                };
+                Some((s + item.boost, item))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+        let limit = if self.kind == PaletteKind::GoTo { 60 } else { 200 };
+        self.shown = scored.into_iter().take(limit).map(|(_, i)| i.clone()).collect();
+    }
+}
+
+/// Lists the folders inside a typed path, e.g. "~/Doc" -> ~/Documents.
+fn complete_path(q: &str) -> Vec<PaletteItem> {
+    let expanded = expand_tilde(q);
+    let (parent, partial) = if q.ends_with('/') {
+        (expanded.clone(), String::new())
+    } else {
+        (
+            expanded.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/")),
+            expanded.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        )
+    };
+    let mut out = Vec::new();
+    if expanded.is_dir() {
+        out.push(dir_item(expanded.clone(), 0));
+    }
+    let mut subs: Vec<(i32, PathBuf)> = subdirs(&parent, partial.starts_with('.'))
+        .into_iter()
+        .filter(|p| p != &expanded)
+        .filter_map(|p| {
+            let name = p.file_name()?.to_string_lossy().into_owned();
+            fuzzy::score(&partial, &name).map(|s| (s, p))
+        })
+        .collect();
+    subs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    out.extend(subs.into_iter().take(60).map(|(_, p)| dir_item(p, 0)));
+    out
+}
+
+pub fn dir_item(p: PathBuf, boost: i32) -> PaletteItem {
+    let title = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into());
+    PaletteItem { title, detail: tilde(&p), target: PaletteTarget::Dir(p), boost }
+}
+
+fn dialog<'a>(title: &str) -> egui::Window<'a> {
+    egui::Window::new(title.to_string())
+        .id(egui::Id::new("modal_dialog"))
+        .collapsible(false)
+        .resizable(false)
+        .order(egui::Order::Foreground)
+        .fade_in(false)
+        .anchor(Align2::CENTER_TOP, vec2(0.0, 120.0))
+}
+
+fn enter_esc(ctx: &egui::Context) -> (bool, bool) {
+    ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::NONE, Key::Escape)))
+}
+
+impl App {
+    pub(crate) fn modal_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut modal) = self.modal.take() else { return };
+        // Dim the window behind the dialog.
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("dim")))
+            .rect_filled(ctx.screen_rect(), 0.0, Color32::from_black_alpha(110));
+
+        let mut close = false;
+        let mut input_ok = false;
+        let mut pack_ok = false;
+        let mut unpack_ok = false;
+        let mut start: Option<JobSpec> = None;
+        let mut pick: Option<PaletteTarget> = None;
+
+        match &mut modal {
+            Modal::Input { title, hint, text, select_chars, first, .. } => {
+                let (enter, esc) = enter_esc(ctx);
+                input_ok = enter;
+                close = esc;
+                let id = egui::Id::new("modal_input");
+                if *first {
+                    // Focus and pre-select before drawing, so keys typed straight
+                    // after opening the dialog land in it.
+                    let end = text.chars().count();
+                    let (a, b) = match select_chars {
+                        Some(n) => (0, *n),
+                        None => (end, end),
+                    };
+                    let mut st = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(a),
+                        egui::text::CCursor::new(b),
+                    )));
+                    st.store(ctx, id);
+                    ctx.memory_mut(|m| m.request_focus(id));
+                    *first = false;
+                }
+                dialog(title).show(ctx, |ui| {
+                    ui.set_width(520.0);
+                    let out = egui::TextEdit::singleline(text)
+                        .id(id)
+                        .hint_text(hint.as_str())
+                        .desired_width(f32::INFINITY)
+                        .show(ui);
+                    if !out.response.has_focus() {
+                        out.response.request_focus();
+                    }
+                    if !text.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(hint.as_str()).color(theme::c().dim).small());
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            input_ok = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        ui.label(egui::RichText::new("Enter to confirm, Esc to cancel").color(theme::c().dim).small());
+                    });
+                });
+            }
+            Modal::Confirm { title, message, buttons } => {
+                let (enter, esc) = enter_esc(ctx);
+                let mut chosen: Option<usize> = if enter { Some(0) } else { None };
+                dialog(title).show(ctx, |ui| {
+                    ui.set_width(440.0);
+                    ui.label(message.as_str());
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        for (i, (label, _)) in buttons.iter().enumerate() {
+                            let b = if i == 0 {
+                                egui::Button::new(egui::RichText::new(label.as_str()).strong()).fill(theme::c().cursor)
+                            } else {
+                                egui::Button::new(label.as_str())
+                            };
+                            if ui.add(b).clicked() {
+                                chosen = Some(i);
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Enter picks the first button, Esc cancels").color(theme::c().dim).small());
+                });
+                if esc {
+                    close = true;
+                } else if let Some(i) = chosen {
+                    close = true;
+                    start = buttons.get_mut(i).and_then(|(_, s)| s.take());
+                }
+            }
+            Modal::Message { title, text } => {
+                let (enter, esc) = enter_esc(ctx);
+                close = enter || esc;
+                dialog(title).show(ctx, |ui| {
+                    ui.set_width(560.0);
+                    egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+                        ui.label(text.as_str());
+                    });
+                    ui.add_space(8.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            }
+            Modal::Pack { path, format, level, separate, delete_after, sources, first } => {
+                let (enter, esc) = enter_esc(ctx);
+                close = esc;
+                pack_ok = enter;
+                let id = egui::Id::new("pack_path");
+                if std::mem::take(first) {
+                    ctx.memory_mut(|m| m.request_focus(id));
+                }
+                let title = format!("Pack {}", crate::app::describe(sources));
+                dialog(&title).show(ctx, |ui| {
+                    ui.set_width(560.0);
+                    ui.label("Archive:");
+                    ui.add(egui::TextEdit::singleline(path).id(id).desired_width(f32::INFINITY));
+                    ui.add_space(8.0);
+                    egui::Grid::new("pack").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                        ui.label("Format");
+                        ui.horizontal(|ui| {
+                            for f in crate::archive::Format::ALL {
+                                if ui.radio(*format == f, f.label()).clicked() && *format != f {
+                                    *format = f;
+                                    let stem = crate::archive::strip_archive_ext(path.trim()).to_string();
+                                    *path = format!("{stem}.{}", f.ext());
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        if format.compresses() {
+                            ui.label("Compression");
+                            ui.horizontal(|ui| {
+                                for (l, name) in [(1, "Fast"), (6, "Normal"), (9, "Best")] {
+                                    if ui.radio(*level == l, name).clicked() {
+                                        *level = l;
+                                    }
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if sources.len() > 1 {
+                        ui.checkbox(separate, "One archive per item");
+                    }
+                    ui.checkbox(delete_after, "Delete the originals afterwards (move into the archive)");
+                    let th = theme::c();
+                    if !*separate && expand_tilde(path.trim()).exists() {
+                        ui.label(egui::RichText::new("An archive with this name exists and will be replaced.").color(th.error).small());
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Pack").clicked() {
+                            pack_ok = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        ui.label(egui::RichText::new("Enter to pack, Esc to cancel").color(th.dim).small());
+                    });
+                });
+            }
+            Modal::Unpack { archives, dest, into_folder, first } => {
+                let (enter, esc) = enter_esc(ctx);
+                close = esc;
+                unpack_ok = enter;
+                let id = egui::Id::new("unpack_dest");
+                if std::mem::take(first) {
+                    ctx.memory_mut(|m| m.request_focus(id));
+                }
+                let title = format!("Unpack {}", crate::app::describe(archives));
+                dialog(&title).show(ctx, |ui| {
+                    ui.set_width(560.0);
+                    ui.label("Unpack to:");
+                    ui.add(egui::TextEdit::singleline(dest).id(id).desired_width(f32::INFINITY));
+                    ui.add_space(6.0);
+                    ui.checkbox(into_folder, "Unpack each archive into its own folder");
+                    let th = theme::c();
+                    if !*into_folder {
+                        ui.label(egui::RichText::new("Files with the same names are replaced.").color(th.dim).small());
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Unpack").clicked() {
+                            unpack_ok = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            }
+            Modal::Appearance { ui_filter, mono_filter } => {
+                let (_, esc) = enter_esc(ctx);
+                close = esc;
+                let mut changed = false;
+                dialog("Appearance").show(ctx, |ui| {
+                    ui.set_width(520.0);
+                    egui::Grid::new("appearance").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                        ui.label("Colour scheme");
+                        egui::ComboBox::from_id_salt("scheme").width(300.0).selected_text(self.settings.color_scheme.clone()).show_ui(ui, |ui| {
+                            for (name, _) in theme::SCHEMES {
+                                if ui.selectable_label(self.settings.color_scheme == *name, *name).clicked() {
+                                    self.settings.color_scheme = name.to_string();
+                                    changed = true;
+                                }
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label("Interface font");
+                        changed |= font_picker(ui, "ui_font", &mut self.settings.ui_font, ui_filter, false);
+                        ui.end_row();
+
+                        ui.label("Monospace font");
+                        changed |= font_picker(ui, "mono_font", &mut self.settings.mono_font, mono_filter, true);
+                        ui.end_row();
+
+                        ui.label("Text size");
+                        // Apply the size when the slider is let go: resizing while dragging moves
+                        // the slider under the mouse and makes the window flicker.
+                        let r = ui.add(egui::Slider::new(&mut self.settings.font_size, 9.0..=32.0).step_by(1.0));
+                        changed |= r.drag_stopped() || (r.changed() && !r.dragged());
+                        ui.end_row();
+
+                        ui.label("Rows");
+                        changed |= ui.checkbox(&mut self.settings.striped_rows, "Alternate row brightness").changed();
+                        ui.end_row();
+
+                        ui.label("Folders");
+                        if ui.checkbox(&mut self.settings.show_dotdot, "Show “..” at the top to go up a level").changed() {
+                            for p in &mut self.panes {
+                                p.show_dotdot = self.settings.show_dotdot;
+                                p.apply_view();
+                            }
+                            self.dirty = true;
+                        }
+                        ui.end_row();
+                    });
+                    ui.add_space(10.0);
+                    // A small preview of the colours.
+                    let th = theme::c();
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 96.0), Sense::hover());
+                    let p = ui.painter_at(rect);
+                    p.rect_filled(rect, 4.0, th.pane);
+                    let font = FontId::proportional(self.settings.font_size);
+                    let rows: [(&str, Color32, Option<Color32>); 4] = [
+                        ("🗀  Documents", th.folder, None),
+                        ("🗋  notes.txt", th.text, Some(th.cursor)),
+                        ("🗋  photo.jpg", th.selected, None),
+                        ("🗋  link ↗", th.symlink, None),
+                    ];
+                    for (i, (t, c, bg)) in rows.iter().enumerate() {
+                        let r = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0 + i as f32 * 22.0), egui::vec2(rect.width() - 8.0, 22.0));
+                        if let Some(bg) = bg {
+                            p.rect_filled(r, 3.0, *bg);
+                        }
+                        p.text(pos2(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, *t, font.clone(), *c);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Single colours can be changed under \"custom_colors\" in the settings file (Ctrl+,).").color(th.dim).small());
+                    ui.add_space(6.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+                if changed {
+                    theme::apply(ctx, &self.settings);
+                    self.dirty = true;
+                }
+            }
+            Modal::Palette(st) => {
+                let (c, p) = palette_ui(ctx, st);
+                close = c;
+                pick = p;
+            }
+        }
+
+        if pack_ok && !close {
+            if let Modal::Pack { path, format, level, separate, delete_after, sources, .. } = modal {
+                self.submit_pack(&path, format, level, separate, delete_after, sources);
+            }
+            return;
+        }
+        if unpack_ok && !close {
+            if let Modal::Unpack { archives, dest, into_folder, .. } = modal {
+                self.submit_unpack(archives, &dest, into_folder);
+            }
+            return;
+        }
+        if input_ok && !close {
+            if let Modal::Input { purpose, text, .. } = modal {
+                self.submit_input(purpose, text);
+            }
+            return;
+        }
+        if !close {
+            self.modal = Some(modal);
+        }
+        if let Some(spec) = start {
+            self.start_job(spec);
+        }
+        match pick {
+            Some(PaletteTarget::Cmd(c)) => self.actions.push(Action::Run(c)),
+            Some(PaletteTarget::Dir(p)) => self.actions.push(Action::Navigate(self.active, p)),
+            None => {}
+        }
+    }
+}
+
+/// Draws the searchable list. Returns (close, picked item).
+fn palette_ui(ctx: &egui::Context, st: &mut PaletteState) -> (bool, Option<PaletteTarget>) {
+    let (down, up, pgdn, pgup, enter, esc, tab) = ctx.input_mut(|i| {
+        (
+            i.consume_key(Modifiers::NONE, Key::ArrowDown),
+            i.consume_key(Modifiers::NONE, Key::ArrowUp),
+            i.consume_key(Modifiers::NONE, Key::PageDown),
+            i.consume_key(Modifiers::NONE, Key::PageUp),
+            i.consume_key(Modifiers::NONE, Key::Enter),
+            i.consume_key(Modifiers::NONE, Key::Escape),
+            i.consume_key(Modifiers::NONE, Key::Tab),
+        )
+    });
+    st.refresh();
+    let len = st.shown.len();
+    let mut moved = false;
+    if len > 0 {
+        let before = st.selected;
+        if down {
+            st.selected = (st.selected + 1) % len;
+        }
+        if up {
+            st.selected = (st.selected + len - 1) % len;
+        }
+        if pgdn {
+            st.selected = (st.selected + 10).min(len - 1);
+        }
+        if pgup {
+            st.selected = st.selected.saturating_sub(10);
+        }
+        moved = before != st.selected;
+    }
+    // Tab completes a typed path in "Go to".
+    let mut completed = false;
+    if tab && st.kind == PaletteKind::GoTo {
+        if let Some(PaletteTarget::Dir(p)) = st.shown.get(st.selected).map(|i| i.target.clone()) {
+            let mut q = tilde(&p);
+            if !q.ends_with('/') {
+                q.push('/');
+            }
+            st.query = q;
+            completed = true;
+        }
+    }
+    let mut close = esc;
+    let mut pick = if enter { st.shown.get(st.selected).map(|i| i.target.clone()) } else { None };
+    let hint = match st.kind {
+        PaletteKind::Commands => "Type to find a command…",
+        PaletteKind::GoTo => "Part of a folder name, or a path like ~/Documents (Tab completes)",
+    };
+    let resp = egui::Window::new("palette")
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .order(egui::Order::Foreground)
+        .fade_in(false)
+        .anchor(Align2::CENTER_TOP, vec2(0.0, 40.0))
+        .frame(egui::Frame::window(&ctx.style()).fill(theme::c().header).inner_margin(8.0))
+        .show(ctx, |ui| {
+            ui.set_width(640.0);
+            if st.first {
+                // Focus before drawing so keys typed straight away land in the search box.
+                ui.ctx().memory_mut(|m| m.request_focus(egui::Id::new("palette_text")));
+            }
+            let mut out = egui::TextEdit::singleline(&mut st.query)
+                .id(egui::Id::new("palette_text"))
+                .hint_text(hint)
+                .desired_width(f32::INFINITY)
+                .font(egui::TextStyle::Heading)
+                .show(ui);
+            if st.first || !out.response.has_focus() {
+                out.response.request_focus();
+                st.first = false;
+            }
+            if completed {
+                let end = st.query.chars().count();
+                out.state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(end))));
+                out.state.store(ui.ctx(), out.response.id);
+            }
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().max_height(400.0).auto_shrink([false, true]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                if st.shown.is_empty() {
+                    ui.label(egui::RichText::new("No matches").color(theme::c().dim));
+                }
+                let size = ui.style().text_styles[&egui::TextStyle::Body].size;
+                let font = FontId::proportional(size);
+                let small = FontId::proportional(size - 1.5);
+                for (i, item) in st.shown.iter().enumerate() {
+                    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+                    let painter = ui.painter_at(rect);
+                    if i == st.selected {
+                        painter.rect_filled(rect, 3.0, theme::c().cursor);
+                        if moved {
+                            r.scroll_to_me(None);
+                        }
+                    } else if r.hovered() {
+                        painter.rect_filled(rect, 3.0, theme::c().cursor_inactive);
+                    }
+                    let y = rect.center().y;
+                    painter.text(pos2(rect.left() + 8.0, y), Align2::LEFT_CENTER, &item.title, font.clone(), theme::c().text);
+                    painter.text(pos2(rect.right() - 8.0, y), Align2::RIGHT_CENTER, &item.detail, small.clone(), theme::c().dim);
+                    if r.clicked() {
+                        pick = Some(item.target.clone());
+                    }
+                }
+            });
+        });
+    // Clicking outside closes the palette.
+    if let Some(r) = resp {
+        let outside = ctx.input(|i| {
+            i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !r.response.rect.contains(p))
+        });
+        close |= outside;
+    }
+    if pick.is_some() {
+        close = true;
+    }
+    (close, pick)
+}
+
+/// A searchable list of installed fonts. Returns true when the choice changed.
+fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, filter: &mut String, mono: bool) -> bool {
+    let mut changed = false;
+    let shown = if value.is_empty() { "Built-in".to_string() } else { value.clone() };
+    egui::ComboBox::from_id_salt(id).width(300.0).height(360.0).selected_text(shown).show_ui(ui, |ui| {
+        ui.add(egui::TextEdit::singleline(filter).hint_text("Filter…").desired_width(f32::INFINITY));
+        if ui.selectable_label(value.is_empty(), "Built-in").clicked() {
+            value.clear();
+            changed = true;
+        }
+        let f = filter.to_lowercase();
+        let mut list = theme::font_families(mono);
+        if list.is_empty() {
+            list = theme::font_families(false);
+        }
+        for name in list.iter().filter(|n| f.is_empty() || n.to_lowercase().contains(&f)).take(400) {
+            if ui.selectable_label(value == name, name.as_str()).clicked() {
+                *value = name.clone();
+                changed = true;
+            }
+        }
+    });
+    changed
+}

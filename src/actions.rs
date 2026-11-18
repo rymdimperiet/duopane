@@ -1,0 +1,783 @@
+//! What each command does. `commands.rs` maps names and shortcuts to these.
+
+use crate::app::{describe, plural, subdirs, tilde, App, CmdRef, InputPurpose, Modal};
+use crate::dialogs::{dir_item, PaletteItem, PaletteKind, PaletteState, PaletteTarget};
+use crate::fs_ops::{self, ConflictPolicy, JobSpec};
+use crate::pane::SortKey;
+use crate::settings::Settings;
+use crate::theme;
+use eframe::egui;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command as Process;
+use std::sync::mpsc;
+
+impl App {
+    pub fn open_cursor(&mut self, _ctx: &egui::Context) {
+        let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
+        let in_archive = self.panes[self.active].archive.is_some();
+        if e.is_dir {
+            self.navigate(self.active, &e.path);
+        } else if !in_archive && crate::archive::is_archive(&e.path) {
+            // Like Double Commander: step into the archive as if it were a folder.
+            self.navigate(self.active, &e.path);
+            if self.panes[self.active].archive.is_some() {
+                self.set_status("Inside the archive · F5 copies files out · “..” leaves", false);
+            }
+        } else {
+            self.open_external_entry(&e);
+        }
+    }
+
+    /// Shift+Enter: open with the system's app, even archives.
+    pub fn open_external(&mut self) {
+        let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
+        if e.is_dir {
+            return self.navigate(self.active, &e.path);
+        }
+        self.open_external_entry(&e);
+    }
+
+    fn open_external_entry(&mut self, e: &crate::pane::Entry) {
+        let Some(path) = self.materialize(&e.path) else { return };
+        {
+            match open::that_detached(&path) {
+                Ok(()) => self.set_status(format!("Opened {}", e.name), false),
+                Err(err) => self.set_status(format!("Couldn't open {}: {err}", e.name), true),
+            }
+        }
+    }
+
+    pub fn go_up(&mut self) {
+        let r = self.panes[self.active].go_up();
+        self.after_move(self.active, r);
+    }
+
+    /// A real file for an entry: entries inside an archive are unpacked to a temporary folder.
+    pub(crate) fn materialize(&mut self, path: &Path) -> Option<PathBuf> {
+        let pane = &self.panes[self.active];
+        let Some(a) = &pane.archive else { return Some(path.to_path_buf()) };
+        let inner = pane.inner_path(path)?;
+        let file = a.file.clone();
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        let out = temp_area().join(n.to_string()).join(name);
+        match crate::archive::extract_one(&file, &inner, &out) {
+            Ok(()) => Some(out),
+            Err(e) => {
+                self.set_status(format!("Couldn't unpack it: {e}"), true);
+                None
+            }
+        }
+    }
+
+    /// Commands that would change an archive being browsed say so instead.
+    fn refuse_in_archive(&mut self, what: &str) -> bool {
+        if self.panes[self.active].archive.is_some() {
+            self.set_status(format!("{what} isn't possible inside an archive (F5 copies files out)"), true);
+            return true;
+        }
+        false
+    }
+
+    fn refuse_other_in_archive(&mut self) -> bool {
+        if self.panes[self.other()].archive.is_some() {
+            self.set_status("The other pane is inside an archive; files can't be put into an archive that way yet", true);
+            return true;
+        }
+        false
+    }
+
+    /// F3: opens the lister on the file under the cursor.
+    pub fn view_file(&mut self) {
+        let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
+        if e.is_dir {
+            return self.set_status("That's a folder; put the cursor on a file to view it", true);
+        }
+        let Some(path) = self.materialize(&e.path) else { return };
+        self.lister = Some(crate::lister::Lister::open(&path, crate::lister_load::Mode::Auto, self.settings.lister_wrap, self.settings.lister_plugins.clone()));
+    }
+
+    /// Lister N / P: view the next or previous file in the folder.
+    pub(crate) fn lister_step(&mut self, dir: isize) {
+        let mode = self.lister.as_ref().map(|l| l.mode).unwrap_or(crate::lister_load::Mode::Auto);
+        let pane = &mut self.panes[self.active];
+        let n = pane.entries.len() as isize;
+        let mut i = pane.cursor as isize;
+        loop {
+            i += dir;
+            if i < 0 || i >= n {
+                self.set_status(if dir > 0 { "That was the last file" } else { "That was the first file" }, false);
+                return;
+            }
+            if !pane.entries[i as usize].is_dir {
+                break;
+            }
+        }
+        pane.set_cursor(i as usize);
+        let virt = pane.entries[i as usize].path.clone();
+        let Some(path) = self.materialize(&virt) else { return };
+        let mode = if mode == crate::lister_load::Mode::Hex { mode } else { crate::lister_load::Mode::Auto };
+        self.lister = Some(crate::lister::Lister::open(&path, mode, self.settings.lister_wrap, self.settings.lister_plugins.clone()));
+    }
+
+    /// Alt+F5: pack the selection into an archive, Double Commander style.
+    pub fn ask_pack(&mut self) {
+        if self.refuse_in_archive("Packing") || self.refuse_other_in_archive() {
+            return;
+        }
+        let sources = self.panes[self.active].targets();
+        if sources.is_empty() {
+            return self.set_status("Nothing to pack here", true);
+        }
+        let name = if sources.len() == 1 {
+            let s = &sources[0];
+            if s.is_dir() {
+                s.file_name().map(|n| n.to_string_lossy().into_owned())
+            } else {
+                s.file_stem().map(|n| n.to_string_lossy().into_owned())
+            }
+        } else {
+            self.panes[self.active].path.file_name().map(|n| n.to_string_lossy().into_owned())
+        }
+        .unwrap_or_else(|| "archive".into());
+        let dir = self.panes[self.other()].path.clone();
+        let format = crate::archive::Format::Zip;
+        let path = tilde(&dir.join(format!("{name}.{}", format.ext())));
+        self.modal = Some(Modal::Pack { path, format, level: 6, separate: false, delete_after: false, sources, first: true });
+    }
+
+    /// Turns the Pack dialog's choices into background jobs.
+    pub(crate) fn submit_pack(&mut self, path: &str, format: crate::archive::Format, level: u32, separate: bool, delete_after: bool, sources: Vec<PathBuf>) {
+        let archive = self.resolve_input_path(path);
+        let Some(dir) = archive.parent().map(Path::to_path_buf) else { return };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return self.set_status(format!("Couldn't create {}: {e}", dir.display()), true);
+        }
+        if separate && sources.len() > 1 {
+            for s in sources {
+                let name = s.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let archive = dir.join(format!("{name}.{}", format.ext()));
+                self.start_job(JobSpec::Pack { sources: vec![s], archive, format, level, delete_after });
+            }
+        } else {
+            self.start_job(JobSpec::Pack { sources, archive, format, level, delete_after });
+        }
+    }
+
+    /// Alt+F9: unpack the selected archives.
+    pub fn ask_unpack(&mut self) {
+        if self.refuse_in_archive("Unpacking a nested archive") || self.refuse_other_in_archive() {
+            return;
+        }
+        let archives: Vec<PathBuf> = self.panes[self.active].targets().into_iter().filter(|p| crate::archive::is_archive(p)).collect();
+        if archives.is_empty() {
+            return self.set_status("Select a .zip, .tar, .tar.gz or .tgz file to unpack", true);
+        }
+        let dest = tilde(&self.panes[self.other()].path);
+        self.modal = Some(Modal::Unpack { archives, dest, into_folder: true, first: true });
+    }
+
+    pub(crate) fn submit_unpack(&mut self, archives: Vec<PathBuf>, dest: &str, into_folder: bool) {
+        let dest = self.resolve_input_path(dest);
+        if let Err(e) = std::fs::create_dir_all(&dest) {
+            return self.set_status(format!("Couldn't create {}: {e}", dest.display()), true);
+        }
+        self.start_job(JobSpec::Unpack { archives, dest, into_folder });
+    }
+
+    /// F12: colour scheme and fonts.
+    pub fn open_appearance(&mut self) {
+        self.modal = Some(Modal::Appearance { ui_filter: String::new(), mono_filter: String::new() });
+    }
+
+    /// Goes down into the folder under the cursor (files are left alone).
+    pub fn enter_folder(&mut self) {
+        let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
+        let into_archive = !e.is_dir && self.panes[self.active].archive.is_none() && crate::archive::is_archive(&e.path);
+        if e.is_dir || into_archive {
+            self.navigate(self.active, &e.path);
+        }
+    }
+
+    /// Double Commander style "select/deselect by mask" (numpad + / -).
+    pub fn ask_mask(&mut self, select: bool) {
+        let last = self.settings.mask_history.first().cloned().unwrap_or_else(|| "*".into());
+        let n = last.chars().count();
+        let title = if select { "Select by mask" } else { "Deselect by mask" };
+        let mut hint = "e.g. *.jpg;*.png   ·   *.txt | readme*   ·   end with / for folders".to_string();
+        if self.settings.mask_history.len() > 1 {
+            hint = format!("Recent: {}", self.settings.mask_history.iter().take(5).cloned().collect::<Vec<_>>().join("   "));
+        }
+        self.modal = Some(Modal::Input {
+            title: title.into(),
+            hint,
+            text: last,
+            purpose: InputPurpose::Mask { select },
+            select_chars: Some(n),
+            first: true,
+        });
+    }
+
+    fn apply_mask(&mut self, select: bool, mask: &str) {
+        self.settings.mask_history.retain(|m| m != mask);
+        self.settings.mask_history.insert(0, mask.to_string());
+        self.settings.mask_history.truncate(20);
+        self.dirty = true;
+        let n = self.panes[self.active].select_by_mask(mask, select);
+        let verb = if select { "Selected" } else { "Deselected" };
+        if n == 0 {
+            self.set_status(format!("Nothing matches “{mask}” (end a mask with / to match folders)"), true);
+        } else {
+            self.set_status(format!("{verb} {}", plural(n, "item")), false);
+        }
+    }
+
+    pub fn back(&mut self) {
+        let r = self.panes[self.active].go_back();
+        self.after_move(self.active, r);
+    }
+
+    pub fn forward(&mut self) {
+        let r = self.panes[self.active].go_forward();
+        self.after_move(self.active, r);
+    }
+
+    pub fn switch_pane(&mut self) {
+        self.active = self.other();
+        self.quick.clear();
+    }
+
+    pub fn go_home(&mut self) {
+        if let Some(h) = dirs::home_dir() {
+            self.navigate(self.active, &h);
+        }
+    }
+
+    pub fn open_in(&mut self, side: usize) {
+        let pane = &self.panes[self.active];
+        let target = match pane.cursor_entry() {
+            Some(e) if e.is_dir => e.path.clone(),
+            _ => pane.path.clone(),
+        };
+        self.navigate(side, &target);
+    }
+
+    pub fn mirror(&mut self) {
+        let p = self.panes[self.active].path.clone();
+        let other = self.other();
+        self.navigate(other, &p);
+    }
+
+    pub fn swap_panes(&mut self) {
+        self.panes.swap(0, 1);
+        self.active = self.other();
+        self.dirty = true;
+    }
+
+    pub fn edit_path(&mut self) {
+        let pane = &mut self.panes[self.active];
+        pane.editing_path = Some(tilde(&pane.path));
+    }
+
+    pub fn toggle_hidden(&mut self) {
+        self.settings.show_hidden = !self.settings.show_hidden;
+        let show = self.settings.show_hidden;
+        for p in &mut self.panes {
+            p.set_show_hidden(show);
+        }
+        self.set_status(if show { "Showing hidden files" } else { "Hiding hidden files" }, false);
+        self.dirty = true;
+    }
+
+    pub fn reload_all(&mut self) {
+        for p in &mut self.panes {
+            p.reload();
+        }
+    }
+
+    pub fn sort_by(&mut self, key: SortKey) {
+        self.panes[self.active].set_sort(key);
+        self.dirty = true;
+    }
+
+    pub fn copy_paths(&mut self, ctx: &egui::Context) {
+        let targets = self.panes[self.active].targets();
+        if targets.is_empty() {
+            return;
+        }
+        let text = targets.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n");
+        ctx.copy_text(text);
+        self.set_status(format!("Copied {} to the clipboard", plural(targets.len(), "path")), false);
+    }
+
+    pub fn add_bookmark(&mut self) {
+        let p = self.panes[self.active].path.clone();
+        if !self.settings.bookmarks.contains(&p) {
+            self.settings.bookmarks.push(p.clone());
+            self.dirty = true;
+        }
+        self.set_status(format!("Bookmarked {} (find it with Go to)", tilde(&p)), false);
+    }
+
+    pub fn remove_bookmark(&mut self) {
+        let p = self.panes[self.active].path.clone();
+        let before = self.settings.bookmarks.len();
+        self.settings.bookmarks.retain(|b| b != &p);
+        if self.settings.bookmarks.len() != before {
+            self.dirty = true;
+            self.set_status("Bookmark removed", false);
+        } else {
+            self.set_status("This folder isn't bookmarked", true);
+        }
+    }
+
+    fn ask(&mut self, title: String, hint: &str, text: String, purpose: InputPurpose, select_chars: Option<usize>) {
+        self.modal = Some(Modal::Input { title, hint: hint.into(), text, purpose, select_chars, first: true });
+    }
+
+    pub fn ask_transfer(&mut self, mv: bool) {
+        let sources = self.panes[self.active].targets();
+        if sources.is_empty() {
+            return self.set_status("Nothing to copy here", true);
+        }
+        if self.refuse_other_in_archive() {
+            return;
+        }
+        let dest = tilde(&self.panes[self.other()].path);
+        let pane = &self.panes[self.active];
+        if let Some(a) = &pane.archive {
+            if mv {
+                return self.set_status("Moving out of an archive isn't possible; F5 copies files out", true);
+            }
+            let items: Vec<String> = sources.iter().filter_map(|p| pane.inner_path(p)).collect();
+            let base = pane.inner_path(&pane.path).unwrap_or_default();
+            let purpose = InputPurpose::Extract { archive: a.file.clone(), items, base };
+            let title = format!("Copy {} out of the archive to:", describe(&sources));
+            return self.ask(title, "Folder", dest, purpose, None);
+        }
+        let title = format!("{} {} to:", if mv { "Move" } else { "Copy" }, describe(&sources));
+        self.ask(title, "Folder (or a new name)", dest, InputPurpose::Transfer { mv, sources }, None);
+    }
+
+    pub fn ask_rename(&mut self) {
+        if self.refuse_in_archive("Renaming") {
+            return;
+        }
+        let Some(e) = self.panes[self.active].cursor_entry().cloned().filter(|e| !e.is_up()) else { return };
+        // Pre-select the name without its extension.
+        let stem_len = match e.name.rfind('.') {
+            Some(i) if i > 0 && !e.is_dir => e.name[..i].chars().count(),
+            _ => e.name.chars().count(),
+        };
+        let title = format!("Rename “{}” to:", e.name);
+        self.ask(title, "New name", e.name.clone(), InputPurpose::Rename(e.path), Some(stem_len));
+    }
+
+    pub fn ask_new_folder(&mut self) {
+        if self.refuse_in_archive("Making a folder") {
+            return;
+        }
+        self.ask("New folder".into(), "Folder name (a/b/c makes nested folders)", String::new(), InputPurpose::NewFolder, None);
+    }
+
+    pub fn ask_new_file(&mut self) {
+        if self.refuse_in_archive("Making a file") {
+            return;
+        }
+        self.ask("New file".into(), "File name", String::new(), InputPurpose::NewFile, None);
+    }
+
+    pub fn edit_cursor(&mut self) {
+        let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
+        if e.is_dir {
+            return self.set_status("That's a folder; press Enter to open it", true);
+        }
+        let in_archive = self.panes[self.active].archive.is_some();
+        let Some(path) = self.materialize(&e.path) else { return };
+        self.edit_in_editor(&path);
+        if in_archive {
+            self.set_status("Editing a temporary copy: changes won't go back into the archive", false);
+        }
+    }
+
+    pub(crate) fn edit_in_editor(&mut self, path: &Path) {
+        let res = if self.settings.editor.trim().is_empty() {
+            open::that_detached(path).map_err(|e| e.to_string())
+        } else {
+            Process::new("sh")
+                .arg("-c")
+                .arg(format!("{} \"$1\"", self.settings.editor))
+                .arg("sh")
+                .arg(path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        };
+        if let Err(e) = res {
+            self.set_status(format!("Couldn't open an editor: {e}"), true);
+        }
+    }
+
+    pub fn ask_delete(&mut self, permanent: bool) {
+        if self.refuse_in_archive("Deleting") {
+            return;
+        }
+        let paths = self.panes[self.active].targets();
+        if paths.is_empty() {
+            return;
+        }
+        let what = describe(&paths);
+        let spec = JobSpec::Delete { paths, permanent };
+        if !permanent && !self.settings.confirm_delete {
+            return self.start_job(spec);
+        }
+        let (title, message, button) = if permanent {
+            ("Delete permanently", format!("Permanently delete {what}? This can't be undone."), "Delete")
+        } else {
+            ("Move to trash", format!("Move {what} to the trash?"), "Move to trash")
+        };
+        self.modal = Some(Modal::Confirm {
+            title: title.into(),
+            message,
+            buttons: vec![(button.into(), Some(spec)), ("Cancel".into(), None)],
+        });
+    }
+
+    pub fn open_terminal(&mut self) {
+        let dir = self.panes[self.active].real_dir();
+        let configured = if !self.settings.terminal.trim().is_empty() {
+            Some(self.settings.terminal.clone())
+        } else {
+            std::env::var("TERMINAL").ok().filter(|t| !t.is_empty())
+        };
+        let res = match configured {
+            Some(t) => Process::new("sh").arg("-c").arg(t).current_dir(&dir).spawn(),
+            None => {
+                let candidates = [
+                    "x-terminal-emulator", "kgx", "gnome-terminal", "konsole", "xfce4-terminal", "kitty",
+                    "alacritty", "foot", "wezterm", "tilix", "xterm",
+                ];
+                match candidates.iter().find(|c| find_in_path(c)) {
+                    Some(t) => Process::new(t).current_dir(&dir).spawn(),
+                    None => return self.set_status("No terminal found; set \"terminal\" in the settings file", true),
+                }
+            }
+        };
+        if let Err(e) = res {
+            self.set_status(format!("Couldn't open a terminal: {e}"), true);
+        }
+    }
+
+    pub fn calculate_size(&mut self) {
+        let targets = self.panes[self.active].targets();
+        if targets.is_empty() {
+            return;
+        }
+        if self.panes[self.active].archive.is_some() {
+            let pane = &self.panes[self.active];
+            let bytes: u64 = targets.iter().map(|p| pane.archive_size(p)).sum();
+            return self.set_status(format!("{}: {} (unpacked)", plural(targets.len(), "item"), crate::pane::human_size(bytes)), false);
+        }
+        let (tx, rx) = mpsc::channel();
+        let n = targets.len();
+        std::thread::spawn(move || {
+            let total = targets.iter().map(|p| fs_ops::tree_size(p)).sum();
+            let _ = tx.send((n, total));
+        });
+        self.size_rx = Some(rx);
+        self.set_status("Calculating size…", false);
+    }
+
+    pub fn cancel_job(&mut self) {
+        self.queue.clear();
+        if let Some(j) = &self.job {
+            j.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.set_status("Cancelling…", false);
+        } else {
+            self.set_status("Nothing is running", false);
+        }
+    }
+
+    pub fn edit_settings(&mut self) {
+        self.store_pane_state();
+        if let Err(e) = self.settings.save() {
+            return self.set_status(format!("Couldn't write settings: {e}"), true);
+        }
+        self.edit_in_editor(&Settings::file());
+        self.set_status("After saving your changes, run “Reload settings file”", false);
+    }
+
+    pub fn reload_settings(&mut self, ctx: &egui::Context) {
+        let (mut s, err) = Settings::load();
+        // Keep the folders currently open.
+        s.left_path = Some(self.panes[0].path.clone());
+        s.right_path = Some(self.panes[1].path.clone());
+        self.settings = s;
+        theme::apply(ctx, &self.settings);
+        let show = self.settings.show_hidden;
+        for p in &mut self.panes {
+            p.show_dotdot = self.settings.show_dotdot;
+            p.set_show_hidden(show);
+        }
+        self.rebuild_bindings();
+        match err {
+            Some(e) => self.set_status(e, true),
+            None => self.set_status("Settings reloaded", false),
+        }
+    }
+
+    pub fn change_font(&mut self, ctx: &egui::Context, delta: f32) {
+        self.settings.font_size = (self.settings.font_size + delta).clamp(9.0, 32.0);
+        theme::apply(ctx, &self.settings);
+        self.dirty = true;
+    }
+
+    pub fn show_help(&mut self) {
+        let mut lines = vec![
+            "Up / Down / PgUp / PgDn / Home / End — move (hold Shift to select)".to_string(),
+            "Space or Insert — select / deselect the item under the cursor".to_string(),
+            "Numpad + / - / * — select by mask, deselect by mask, invert selection".to_string(),
+            "Mouse back / forward buttons — go up / down the folder tree".to_string(),
+            "Type letters — jump to a matching name".to_string(),
+            "Escape — clear the selection".to_string(),
+            "Ctrl+click / Shift+click — select with the mouse; right-click for a menu".to_string(),
+            String::new(),
+        ];
+        for (i, c) in self.commands.iter().enumerate() {
+            let keys = self.keys_for(CmdRef::Builtin(i));
+            if !keys.is_empty() {
+                lines.push(format!("{keys} — {}", c.title));
+            }
+        }
+        lines.push(String::new());
+        lines.push(format!("Settings file: {}", Settings::file().display()));
+        self.modal = Some(Modal::Message { title: "Keyboard shortcuts".into(), text: lines.join("\n") });
+    }
+
+    pub fn open_palette(&mut self) {
+        let mut base = Vec::new();
+        for (i, c) in self.commands.iter().enumerate() {
+            let r = CmdRef::Builtin(i);
+            base.push(PaletteItem { title: c.title.to_string(), detail: self.keys_for(r), target: PaletteTarget::Cmd(r), boost: 0 });
+        }
+        for (i, c) in self.settings.custom_commands.iter().enumerate() {
+            let r = CmdRef::Custom(i);
+            base.push(PaletteItem { title: c.title.clone(), detail: self.keys_for(r), target: PaletteTarget::Cmd(r), boost: 0 });
+        }
+        self.modal = Some(Modal::Palette(PaletteState::new(PaletteKind::Commands, base)));
+    }
+
+    /// "Go to": bookmarks and often-visited folders rank first.
+    pub fn open_goto(&mut self, _ctx: &egui::Context) {
+        let mut found: BTreeMap<PathBuf, i32> = BTreeMap::new();
+        let mut add = |p: PathBuf, boost: i32| {
+            let e = found.entry(p).or_insert(i32::MIN);
+            *e = (*e).max(boost);
+        };
+        for b in &self.settings.bookmarks {
+            add(b.clone(), 400);
+        }
+        for (k, v) in &self.settings.visited {
+            add(PathBuf::from(k), 40 + ((*v as f32).ln() * 60.0) as i32);
+        }
+        if let Some(h) = dirs::home_dir() {
+            add(h.clone(), 60);
+            for d in subdirs(&h, false) {
+                add(d, 20);
+            }
+        }
+        for pane in &self.panes {
+            for d in subdirs(&pane.path, pane.show_hidden) {
+                add(d, 30);
+            }
+            for a in pane.path.ancestors().skip(1) {
+                add(a.to_path_buf(), 25);
+            }
+        }
+        add(PathBuf::from("/"), 0);
+        for root in ["/media", "/mnt", "/run/media"] {
+            for d in subdirs(Path::new(root), false) {
+                add(d.clone(), 15);
+                for dd in subdirs(&d, false) {
+                    add(dd, 15);
+                }
+            }
+        }
+        let base: Vec<PaletteItem> =
+            found.into_iter().filter(|(p, _)| p.is_dir()).map(|(p, boost)| dir_item(p, boost)).collect();
+        self.modal = Some(Modal::Palette(PaletteState::new(PaletteKind::GoTo, base)));
+    }
+
+    /// Runs one of the user's own commands from the settings file.
+    pub(crate) fn run_custom(&mut self, i: usize) {
+        let Some(c) = self.settings.custom_commands.get(i).cloned() else { return };
+        let pane = &self.panes[self.active];
+        let path = pane.cursor_entry().map(|e| e.path.display().to_string()).unwrap_or_default();
+        let dir = pane.path.display().to_string();
+        let other = self.panes[self.other()].path.display().to_string();
+        let selected: Vec<String> = pane.targets().iter().map(|p| p.display().to_string()).collect();
+        let cmd = c
+            .run
+            .replace("{path}", &shell_quote(&path))
+            .replace("{dir}", &shell_quote(&dir))
+            .replace("{other}", &shell_quote(&other))
+            .replace("{selected}", &selected.iter().map(|s| shell_quote(s)).collect::<Vec<_>>().join(" "));
+        let res = Process::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(&pane.path)
+            .env("DUOPANE_PATH", &path)
+            .env("DUOPANE_DIR", &dir)
+            .env("DUOPANE_OTHER", &other)
+            .env("DUOPANE_SELECTED", selected.join("\n"))
+            .spawn();
+        match res {
+            Ok(_) => self.set_status(format!("Ran “{}”", c.title), false),
+            Err(e) => self.set_status(format!("“{}” failed: {e}", c.title), true),
+        }
+    }
+
+    /// Called when a text dialog is confirmed.
+    pub(crate) fn submit_input(&mut self, purpose: InputPurpose, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        match purpose {
+            InputPurpose::Rename(from) => self.rename(&from, &text),
+            InputPurpose::NewFolder => {
+                let path = self.resolve_input_path(&text);
+                match std::fs::create_dir_all(&path) {
+                    Ok(()) => {
+                        let first = text.split('/').next().unwrap_or(&text).to_string();
+                        let p = &mut self.panes[self.active];
+                        p.reload();
+                        p.set_cursor_to_name(&first);
+                    }
+                    Err(e) => self.set_status(format!("Couldn't create the folder: {e}"), true),
+                }
+            }
+            InputPurpose::NewFile => {
+                let path = self.resolve_input_path(&text);
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::File::create_new(&path) {
+                    Ok(_) => {
+                        let p = &mut self.panes[self.active];
+                        p.reload();
+                        if let Some(n) = path.file_name() {
+                            p.set_cursor_to_name(&n.to_string_lossy());
+                        }
+                        self.edit_in_editor(&path);
+                    }
+                    Err(e) => self.set_status(format!("Couldn't create the file: {e}"), true),
+                }
+            }
+            InputPurpose::Transfer { mv, sources } => self.prepare_transfer(mv, sources, &text),
+            InputPurpose::Extract { archive, items, base } => {
+                let dest = self.resolve_input_path(&text);
+                if let Err(e) = std::fs::create_dir_all(&dest) {
+                    return self.set_status(format!("Couldn't create {text}: {e}"), true);
+                }
+                self.start_job(JobSpec::Extract { archive, items, base, dest });
+            }
+            InputPurpose::Mask { select } => self.apply_mask(select, &text),
+        }
+    }
+
+    fn rename(&mut self, from: &Path, text: &str) {
+        if text.contains('/') {
+            return self.set_status("A name can't contain “/”", true);
+        }
+        let to = from.parent().unwrap_or(Path::new("/")).join(text);
+        if to == from {
+            return;
+        }
+        let only_case_changed = from.file_name().map(|n| n.to_string_lossy().to_lowercase()) == Some(text.to_lowercase());
+        if to.symlink_metadata().is_ok() && !only_case_changed {
+            return self.set_status(format!("“{text}” already exists"), true);
+        }
+        match std::fs::rename(from, &to) {
+            Ok(()) => {
+                let p = &mut self.panes[self.active];
+                p.reload();
+                p.set_cursor_to_name(text);
+                let other = self.other();
+                self.panes[other].reload();
+            }
+            Err(e) => self.set_status(format!("Couldn't rename: {e}"), true),
+        }
+    }
+
+    fn prepare_transfer(&mut self, mv: bool, sources: Vec<PathBuf>, text: &str) {
+        let dest = self.resolve_input_path(text);
+        let into = |dest: &Path| -> Vec<(PathBuf, PathBuf)> {
+            sources.iter().filter_map(|s| s.file_name().map(|n| (s.clone(), dest.join(n)))).collect()
+        };
+        let items = if dest.is_dir() {
+            into(&dest)
+        } else if sources.len() == 1 {
+            match dest.parent() {
+                Some(parent) if parent.is_dir() => vec![(sources[0].clone(), dest.clone())],
+                _ => return self.set_status(format!("Folder doesn't exist: {text}"), true),
+            }
+        } else {
+            if let Err(e) = std::fs::create_dir_all(&dest) {
+                return self.set_status(format!("Couldn't create {text}: {e}"), true);
+            }
+            into(&dest)
+        };
+        // Copying something onto itself makes "name copy" instead.
+        let items: Vec<(PathBuf, PathBuf)> = items
+            .into_iter()
+            .filter_map(|(s, d)| {
+                if s != d {
+                    Some((s, d))
+                } else if mv {
+                    None
+                } else {
+                    let u = fs_ops::unique_copy_name(&d);
+                    Some((s, u))
+                }
+            })
+            .collect();
+        if items.is_empty() {
+            return self.set_status("Nothing to do: it's already there", false);
+        }
+        let existing: Vec<&PathBuf> = items.iter().map(|(_, d)| d).filter(|d| d.symlink_metadata().is_ok()).collect();
+        if existing.is_empty() {
+            return self.start_job(JobSpec::Transfer { mv, items, policy: ConflictPolicy::Overwrite });
+        }
+        let message = if existing.len() == 1 {
+            let name = existing[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            format!("“{name}” already exists there. Replace it?")
+        } else {
+            format!("{} items already exist there. Replace them?", existing.len())
+        };
+        let replace = JobSpec::Transfer { mv, items: items.clone(), policy: ConflictPolicy::Overwrite };
+        let skip = JobSpec::Transfer { mv, items, policy: ConflictPolicy::Skip };
+        self.modal = Some(Modal::Confirm {
+            title: "Already exists".into(),
+            message,
+            buttons: vec![("Replace".into(), Some(replace)), ("Skip those".into(), Some(skip)), ("Cancel".into(), None)],
+        });
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn find_in_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|d| d.join(name).is_file()))
+        .unwrap_or(false)
+}
+
+/// Where files unpacked from archives (for viewing or opening) go; removed on exit.
+pub fn temp_area() -> PathBuf {
+    std::env::temp_dir().join(format!("duopane-{}", std::process::id()))
+}

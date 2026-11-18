@@ -1,0 +1,393 @@
+//! Drawing the main window: the two panes and the bars at the bottom.
+
+use crate::app::{plural, Action, App};
+use crate::pane::{human_size, Pane, SortKey};
+use crate::theme;
+use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Sense, Stroke};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+impl App {
+    pub(crate) fn bottom_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("keys")
+            .frame(egui::Frame::default().fill(theme::c().header).inner_margin(egui::Margin::symmetric(8, 4)))
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let keys: [(&str, &str, &'static str); 10] = [
+                        ("F2", "Rename", "rename"),
+                        ("F3", "View", "view"),
+                        ("F4", "Edit", "edit"),
+                        ("F5", "Copy", "copy"),
+                        ("F6", "Move", "move"),
+                        ("F7", "New folder", "new_folder"),
+                        ("F8", "Trash", "delete"),
+                        ("Ctrl+P", "Go to", "go_to"),
+                        ("Ctrl+Shift+P", "Commands", "command_palette"),
+                        ("F12", "Appearance", "appearance"),
+                    ];
+                    for (k, label, id) in keys {
+                        ui.label(egui::RichText::new(k).color(theme::c().dim).small());
+                        if ui.add(egui::Button::new(label).small()).clicked() {
+                            self.actions.push(Action::RunId(id));
+                        }
+                        ui.add_space(8.0);
+                    }
+                });
+            });
+
+        egui::TopBottomPanel::bottom("status")
+            .frame(egui::Frame::default().fill(theme::c().bg).inner_margin(egui::Margin::symmetric(10, 4)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(20.0);
+                    if let Some(job) = &self.job {
+                        let in_bytes = job.label.starts_with("Copying")
+                            || job.label.starts_with("Extracting")
+                            || job.label.starts_with("Packing")
+                            || job.label.starts_with("Unpacking")
+                            || (job.label.starts_with("Moving") && !job.label.contains("trash"));
+                        let text = if in_bytes {
+                            format!("{} — {} of {}", job.label, human_size(job.done), human_size(job.total))
+                        } else {
+                            format!("{} — {} of {}", job.label, job.done, job.total)
+                        };
+                        ui.add(egui::ProgressBar::new(job.fraction()).desired_width(320.0).text(text));
+                        let current = Path::new(&job.current)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        ui.label(egui::RichText::new(current).color(theme::c().dim).small());
+                        if ui.button("Cancel").clicked() {
+                            self.actions.push(Action::RunId("cancel_job"));
+                        }
+                        if !self.queue.is_empty() {
+                            ui.label(egui::RichText::new(format!("+{} queued", self.queue.len())).color(theme::c().dim));
+                        }
+                    } else if !self.quick.is_empty() && self.quick_at.elapsed() < Duration::from_millis(1200) {
+                        ui.label(egui::RichText::new(format!("Find: {}", self.quick)).color(theme::c().accent));
+                    } else if let Some(s) = &self.status {
+                        if s.at.elapsed() < Duration::from_secs(if s.error { 8 } else { 5 }) {
+                            ui.label(egui::RichText::new(&s.text).color(if s.error { theme::c().error } else { theme::c().ok }));
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new("F1 Shortcuts").color(theme::c().dim).small());
+                    });
+                });
+            });
+    }
+
+    pub(crate) fn panes_ui(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(theme::c().bg).inner_margin(6.0))
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let active = self.active;
+                let b0 = self.settings.bookmarks.contains(&self.panes[0].path);
+                let b1 = self.settings.bookmarks.contains(&self.panes[1].path);
+                let (left, right) = self.panes.split_at_mut(1);
+                let actions = &mut self.actions;
+                ui.columns(2, |cols| {
+                    pane_ui(&mut cols[0], &mut left[0], 0, active == 0, b0, actions);
+                    pane_ui(&mut cols[1], &mut right[0], 1, active == 1, b1, actions);
+                });
+            });
+    }
+}
+
+/// Draws one pane: path bar, column headers, the list and a summary line.
+fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmarked: bool, actions: &mut Vec<Action>) {
+    let frame = egui::Frame::default()
+        .fill(theme::c().pane)
+        .stroke(Stroke::new(1.0, if active { theme::c().accent } else { theme::c().border }))
+        .corner_radius(4.0);
+    let resp = frame.show(ui, |ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let full_w = ui.available_width();
+        let body_size = ui.style().text_styles[&egui::TextStyle::Body].size;
+        let font = FontId::proportional(body_size);
+        let small = FontId::proportional(body_size - 1.5);
+
+        path_bar(ui, pane, idx, active, bookmarked, full_w, actions);
+
+        // Size the columns from the text they hold, so they never run into each other.
+        let widths = ui.fonts(|f| {
+            let w = |s: &str| f.layout_no_wrap(s.to_string(), small.clone(), Color32::WHITE).size().x;
+            ColWidths { size: w("888.8 MB") + 16.0, date: w("8888-88-88 88:88").max(w("Modified") + 14.0) + 28.0 }
+        });
+
+        // --- column headers ---
+        let (head_rect, _) = ui.allocate_exact_size(vec2(full_w, theme::row_height(body_size)), Sense::hover());
+        let cols = columns(head_rect, &widths);
+        for (rect, key, label, left) in [
+            (cols.0, SortKey::Name, "Name", true),
+            (cols.1, SortKey::Size, "Size", false),
+            (cols.2, SortKey::Modified, "Modified", false),
+        ] {
+            let r = ui.interact(rect, egui::Id::new(("head", idx, label)), Sense::click());
+            let sorted = pane.sort == key || (left && pane.sort == SortKey::Extension);
+            // Leave room on the right of right-aligned labels for the sort arrow.
+            let (x, align) = if left {
+                (rect.left() + name_indent(body_size), Align2::LEFT_CENTER)
+            } else {
+                (rect.right() - if sorted { 16.0 } else { 4.0 }, Align2::RIGHT_CENTER)
+            };
+            let color = if r.hovered() || sorted { theme::c().text } else { theme::c().dim };
+            let shown = if left && pane.sort == SortKey::Extension { "Name (by type)" } else { label };
+            let text_rect = ui.painter().text(pos2(x, rect.center().y), align, shown, small.clone(), color);
+            if sorted {
+                sort_arrow(ui.painter(), pos2(text_rect.right() + 8.0, rect.center().y), pane.ascending, color);
+            }
+            if r.clicked() {
+                pane.set_sort(key);
+                actions.push(Action::Activate(idx));
+            }
+        }
+        ui.painter().hline(head_rect.x_range(), head_rect.bottom(), Stroke::new(1.0, theme::c().border));
+
+        // --- the list ---
+        let footer_h = 22.0;
+        let list_h = (ui.available_height() - footer_h).max(40.0);
+        let row_h = theme::row_height(body_size);
+        let n = pane.entries.len();
+        let mut area = egui::ScrollArea::vertical()
+            .id_salt(("list", idx))
+            .auto_shrink([false, false])
+            .max_height(list_h)
+            .min_scrolled_height(list_h);
+        if pane.scroll_to_cursor {
+            // Scroll just enough to keep the cursor row visible.
+            let top = pane.cursor as f32 * row_h;
+            let bottom = top + row_h;
+            let vh = pane.view_height.max(row_h);
+            let mut off = pane.scroll_offset;
+            if top < off {
+                off = top;
+            } else if bottom > off + vh {
+                off = bottom - vh;
+            }
+            area = area.vertical_scroll_offset(off.max(0.0));
+            pane.scroll_to_cursor = false;
+        }
+        let out = area.show_rows(ui, row_h, n.max(1), |ui, range| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            if n == 0 {
+                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+                let (msg, color) = match &pane.error {
+                    Some(e) => (e.as_str(), theme::c().error),
+                    None => ("This folder is empty", theme::c().dim),
+                };
+                ui.painter().text(pos2(rect.left() + name_indent(body_size), rect.center().y), Align2::LEFT_CENTER, msg, small.clone(), color);
+                return;
+            }
+            for i in range {
+                row_ui(ui, pane, i, idx, active, &font, &small, &widths, row_h, actions);
+            }
+        });
+        pane.scroll_offset = out.state.offset.y;
+        pane.view_height = out.inner_rect.height();
+
+        // --- footer ---
+        let (foot_rect, _) = ui.allocate_exact_size(vec2(full_w, footer_h), Sense::hover());
+        ui.painter().hline(foot_rect.x_range(), foot_rect.top(), Stroke::new(1.0, theme::c().border));
+        let (dirs, files, sel, bytes) = pane.summary();
+        let text = if sel > 0 {
+            format!("{sel} of {} selected · {}", dirs + files, human_size(bytes))
+        } else {
+            format!("{} · {}", plural(dirs, "folder"), plural(files, "file"))
+        };
+        let hidden = if pane.show_hidden { "" } else { "   (hidden files not shown: Ctrl+.)" };
+        ui.painter().text(
+            pos2(foot_rect.left() + 10.0, foot_rect.center().y),
+            Align2::LEFT_CENTER,
+            format!("{text}{hidden}"),
+            small.clone(),
+            if sel > 0 { theme::c().selected } else { theme::c().dim },
+        );
+    });
+    if resp.response.contains_pointer() && ui.input(|i| i.pointer.any_pressed()) {
+        actions.push(Action::Activate(idx));
+    }
+}
+
+/// The clickable folder path at the top of a pane (Ctrl+L to type one).
+fn path_bar(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmarked: bool, w: f32, actions: &mut Vec<Action>) {
+    let (bar_rect, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
+    ui.painter().rect_filled(bar_rect, 4.0, theme::c().header);
+    let mut bar = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(bar_rect.shrink2(vec2(8.0, 3.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    if let Some(text) = &mut pane.editing_path {
+        let r = bar.add(egui::TextEdit::singleline(text).id(egui::Id::new(("path_edit", idx))).desired_width(f32::INFINITY));
+        let (enter, esc) = bar.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+        if r.lost_focus() || esc {
+            if enter && !esc {
+                actions.push(Action::Navigate(idx, crate::app::expand_tilde(text.trim())));
+            }
+            pane.editing_path = None;
+        } else if !r.has_focus() {
+            r.request_focus();
+        }
+        return;
+    }
+    egui::ScrollArea::horizontal()
+        .id_salt(("crumbs", idx))
+        .stick_to_right(true)
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(&mut bar, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let parts: Vec<PathBuf> = pane.path.ancestors().map(Path::to_path_buf).collect();
+                let n = parts.len();
+                for (i, p) in parts.into_iter().rev().enumerate() {
+                    let label = if i == 0 {
+                        "/".to_string()
+                    } else {
+                        p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                    };
+                    let last = i + 1 == n;
+                    let color = if last && active { theme::c().text } else { theme::c().dim };
+                    let mut text = egui::RichText::new(label).color(color);
+                    if last {
+                        text = text.strong();
+                    }
+                    if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                        actions.push(Action::Navigate(idx, p.clone()));
+                    }
+                    if !last && i > 0 {
+                        ui.label(egui::RichText::new("›").color(theme::c().dim));
+                    }
+                }
+                if bookmarked {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("★").color(theme::c().selected)).on_hover_text("Bookmarked");
+                }
+            });
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row_ui(
+    ui: &mut egui::Ui,
+    pane: &mut Pane,
+    i: usize,
+    idx: usize,
+    active: bool,
+    font: &FontId,
+    small: &FontId,
+    widths: &ColWidths,
+    row_h: f32,
+    actions: &mut Vec<Action>,
+) {
+    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+    let Some(e) = pane.entries.get(i) else { return };
+    let selected = pane.selected.contains(&e.name);
+    let painter = ui.painter_at(rect);
+    let bg = rect.shrink2(vec2(2.0, 0.0));
+    if let Some(stripe) = theme::c().stripe.filter(|_| i % 2 == 1) {
+        painter.rect_filled(rect, 0.0, stripe);
+    }
+    if i == pane.cursor {
+        painter.rect_filled(bg, 3.0, if active { theme::c().cursor } else { theme::c().cursor_inactive });
+    } else if selected {
+        painter.rect_filled(bg, 3.0, theme::c().selected.gamma_multiply(0.12));
+    } else if r.hovered() {
+        painter.rect_filled(bg, 3.0, theme::c().text.gamma_multiply(0.05));
+    }
+    let color = if selected {
+        theme::c().selected
+    } else if e.is_dir {
+        theme::c().folder
+    } else if e.is_symlink {
+        theme::c().symlink
+    } else {
+        theme::c().text
+    };
+    let y = rect.center().y;
+    let (c_name, c_size, c_date) = columns(rect, widths);
+    let icon = if e.is_dir { "🗀" } else { "🗋" };
+    painter.text(pos2(c_name.left() + 8.0, y), Align2::LEFT_CENTER, icon, font.clone(), color.gamma_multiply(0.8));
+    let name = if e.is_symlink { format!("{} ↗", e.name) } else { e.name.clone() };
+    painter.with_clip_rect(c_name).text(pos2(c_name.left() + name_indent(font.size), y), Align2::LEFT_CENTER, name, font.clone(), color);
+    if !e.is_dir {
+        painter.text(pos2(c_size.right() - 4.0, y), Align2::RIGHT_CENTER, human_size(e.size), small.clone(), theme::c().dim);
+    }
+    if let Some(t) = e.modified {
+        let dt: chrono::DateTime<chrono::Local> = t.into();
+        let s = dt.format("%Y-%m-%d %H:%M").to_string();
+        painter.text(pos2(c_date.right() - 4.0, y), Align2::RIGHT_CENTER, s, small.clone(), theme::c().dim);
+    }
+
+    if r.clicked() {
+        actions.push(Action::Activate(idx));
+        let m = ui.input(|inp| inp.modifiers);
+        if m.command || m.ctrl {
+            pane.toggle_selected(i);
+        } else if m.shift {
+            let c = pane.cursor;
+            pane.select_range(c, i);
+        }
+        pane.cursor = i;
+    }
+    if r.double_clicked() {
+        pane.cursor = i;
+        actions.push(Action::RunId("open"));
+    }
+    if r.secondary_clicked() {
+        pane.cursor = i;
+        actions.push(Action::Activate(idx));
+    }
+    r.context_menu(|ui| {
+        for (id, title) in [
+            ("open", "Open"),
+            ("edit", "Edit"),
+            ("rename", "Rename…"),
+            ("copy", "Copy to other pane…"),
+            ("move", "Move to other pane…"),
+            ("copy_path", "Copy path"),
+            ("pack", "Pack (compress)…"),
+            ("unpack", "Unpack…"),
+            ("folder_size", "Calculate size"),
+            ("delete", "Move to trash"),
+        ] {
+            if ui.button(title).clicked() {
+                actions.push(Action::RunId(id));
+                ui.close_menu();
+            }
+        }
+    });
+}
+
+/// A small triangle pointing up (ascending) or down.
+fn sort_arrow(painter: &egui::Painter, c: egui::Pos2, up: bool, color: Color32) {
+    let (w, h) = (4.0, 3.5);
+    let pts = if up {
+        vec![pos2(c.x - w, c.y + h), pos2(c.x + w, c.y + h), pos2(c.x, c.y - h)]
+    } else {
+        vec![pos2(c.x - w, c.y - h), pos2(c.x + w, c.y - h), pos2(c.x, c.y + h)]
+    };
+    painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+}
+
+/// Where names start, leaving room for the icon at any text size.
+fn name_indent(font_size: f32) -> f32 {
+    10.0 + font_size * 1.3
+}
+
+/// Widths of the size and date columns, measured from the current font.
+struct ColWidths {
+    size: f32,
+    date: f32,
+}
+
+/// Splits a row into the name, size and date columns.
+fn columns(rect: egui::Rect, w: &ColWidths) -> (egui::Rect, egui::Rect, egui::Rect) {
+    let date_left = rect.right() - w.date - 6.0;
+    let size_left = date_left - w.size;
+    let name = egui::Rect::from_min_max(rect.min, pos2((size_left - 8.0).max(rect.left() + 40.0), rect.bottom()));
+    let size = egui::Rect::from_min_max(pos2(size_left, rect.top()), pos2(date_left, rect.bottom()));
+    let date = egui::Rect::from_min_max(pos2(date_left, rect.top()), pos2(rect.right() - 6.0, rect.bottom()));
+    (name, size, date)
+}
