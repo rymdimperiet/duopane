@@ -47,6 +47,12 @@ impl App {
 
     /// Messages, progress of file operations and the name search.
     fn status_bar(&mut self, ctx: &egui::Context) {
+        // Only take up room when there's something to say.
+        let searching = !self.quick.is_empty() && self.quick_at.elapsed() < Duration::from_millis(1200);
+        let message = self.status.as_ref().is_some_and(|s| s.at.elapsed() < Duration::from_secs(if s.error { 8 } else { 5 }));
+        if self.job.is_none() && !searching && !message {
+            return;
+        }
         egui::TopBottomPanel::bottom("status")
             .frame(egui::Frame::default().fill(theme::c().bg).inner_margin(egui::Margin::symmetric(10, 4)))
             .show(ctx, |ui| {

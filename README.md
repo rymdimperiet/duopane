@@ -144,7 +144,8 @@ cursor, cursor_inactive, error, ok, stripe (every other row).
 Every folder starts with a “..” row (Enter on it goes up a level); it can't be
 selected, renamed, copied or deleted. Both it and the striped rows can be turned
 off in Appearance, and so can the function-key bar at the bottom (also from the
-command palette: “Show / hide the function-key bar”). New schemes go in `src/theme.rs`.
+command palette: “Show / hide the function-key bar”). The status line under the panes only
+appears while there's a message, a file operation in progress or a name search. New schemes go in `src/theme.rs`.
 
 ## Settings
 
