@@ -136,6 +136,7 @@ impl App {
         let mut close = false;
         let mut input_ok = false;
         let mut pack_ok = false;
+        let mut batch_ok = false;
         let mut unpack_ok = false;
         let mut start: Option<JobSpec> = None;
         let mut pick: Option<PaletteTarget> = None;
@@ -232,12 +233,118 @@ impl App {
                     }
                 });
             }
+            Modal::BatchRename { items, others, rules, first, .. } => {
+                let (enter, esc) = enter_esc(ctx);
+                close = esc;
+                let name_id = egui::Id::new("batch_name");
+                if std::mem::take(first) || ctx.memory(|m| m.focused().is_none()) {
+                    // Windows spend their first frame measuring themselves; keep asking.
+                    ctx.memory_mut(|m| m.request_focus(name_id));
+                }
+                let th = theme::c();
+                let title = format!("Batch rename {}", crate::app::plural(items.len(), "item"));
+                dialog(&title).show(ctx, |ui| {
+                    ui.set_width((ctx.screen_rect().width() - 60.0).clamp(400.0, 900.0));
+                    egui::Grid::new("batch").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                        ui.label("Name");
+                        ui.add(egui::TextEdit::singleline(&mut rules.name_mask).id(name_id).desired_width(300.0));
+                        ui.end_row();
+                        ui.label("Extension");
+                        ui.add(egui::TextEdit::singleline(&mut rules.ext_mask).desired_width(300.0));
+                        ui.end_row();
+                        ui.label("Find");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut rules.find).desired_width(200.0));
+                            ui.label("replace with");
+                            ui.add(egui::TextEdit::singleline(&mut rules.replace).desired_width(200.0));
+                            ui.checkbox(&mut rules.regex, "Regular expression");
+                        });
+                        ui.end_row();
+                        ui.label("Case");
+                        egui::ComboBox::from_id_salt("batch_case").selected_text(rules.case.label()).show_ui(ui, |ui| {
+                            for c in crate::rename::Case::ALL {
+                                ui.selectable_value(&mut rules.case, c, c.label());
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Counter [C]");
+                        ui.horizontal(|ui| {
+                            ui.label("start");
+                            ui.add(egui::DragValue::new(&mut rules.counter_start));
+                            ui.label("step");
+                            ui.add(egui::DragValue::new(&mut rules.counter_step));
+                            ui.label("digits");
+                            ui.add(egui::DragValue::new(&mut rules.counter_width).range(1..=12));
+                        });
+                        ui.end_row();
+                    });
+                    ui.label(
+                        egui::RichText::new("[N] name · [N2-5] its characters 2–5 · [E] extension · [C] counter · [P] folder · [Y] [M] [D] [h] [m] [s] date and time")
+                            .color(th.dim)
+                            .small(),
+                    );
+                    ui.separator();
+                    let olds: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
+                    let preview = crate::rename::new_names(items, rules);
+                    let probs = match &preview {
+                        Ok(n) => crate::rename::problems(&olds, n, others),
+                        Err(_) => vec![Some("error"); olds.len()],
+                    };
+                    let ok = preview.is_ok() && probs.iter().all(|p| p.is_none());
+                    // Two fixed columns; long names are shortened (hover for the whole name).
+                    let total = ui.available_width();
+                    let note_w = 170.0;
+                    let col = ((total - note_w - 16.0) / 2.0).max(80.0);
+                    let row = |ui: &mut egui::Ui, a: egui::RichText, b: egui::RichText, c: egui::RichText| {
+                        ui.horizontal(|ui| {
+                            let left = egui::Layout::left_to_right(egui::Align::Center);
+                            for (text, w) in [(a, col), (b, col), (c, note_w)] {
+                                ui.allocate_ui_with_layout(egui::vec2(w, 20.0), left, |ui| {
+                                    ui.set_width(w);
+                                    ui.add(egui::Label::new(text).truncate());
+                                });
+                            }
+                        });
+                    };
+                    row(ui, egui::RichText::new("Old name").color(th.dim), egui::RichText::new("New name").color(th.dim), egui::RichText::new(""));
+                    egui::ScrollArea::vertical().max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
+                        for (i, old) in olds.iter().enumerate() {
+                            let new = match &preview {
+                                Ok(new) => {
+                                    let color = if probs[i].is_some() { th.error } else if new[i] != *old { th.ok } else { th.text };
+                                    egui::RichText::new(&new[i]).color(color)
+                                }
+                                Err(_) => egui::RichText::new(""),
+                            };
+                            let note = egui::RichText::new(probs.get(i).copied().flatten().unwrap_or("")).color(th.error).small();
+                            row(ui, egui::RichText::new(old), new, note);
+                        }
+                    });
+                    if let Err(e) = &preview {
+                        ui.colored_label(th.error, e);
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(ok, egui::Button::new("Rename")).clicked() {
+                            batch_ok = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        ui.label(egui::RichText::new("Enter renames, Esc cancels · undo from the command palette").color(th.dim).small());
+                    });
+                    if enter && ok {
+                        batch_ok = true;
+                    }
+                });
+            }
             Modal::Pack { path, format, level, separate, delete_after, sources, first } => {
                 let (enter, esc) = enter_esc(ctx);
                 close = esc;
                 pack_ok = enter;
                 let id = egui::Id::new("pack_path");
-                if std::mem::take(first) {
+                if std::mem::take(first) || ctx.memory(|m| m.focused().is_none()) {
+                    // Windows spend their first frame measuring themselves; keep asking.
                     ctx.memory_mut(|m| m.request_focus(id));
                 }
                 let title = format!("Pack {}", crate::app::describe(sources));
@@ -296,7 +403,8 @@ impl App {
                 close = esc;
                 unpack_ok = enter;
                 let id = egui::Id::new("unpack_dest");
-                if std::mem::take(first) {
+                if std::mem::take(first) || ctx.memory(|m| m.focused().is_none()) {
+                    // Windows spend their first frame measuring themselves; keep asking.
                     ctx.memory_mut(|m| m.request_focus(id));
                 }
                 let title = format!("Unpack {}", crate::app::describe(archives));
@@ -358,6 +466,12 @@ impl App {
                         changed |= ui.checkbox(&mut self.settings.striped_rows, "Alternate row brightness").changed();
                         ui.end_row();
 
+                        ui.label("Bottom bar");
+                        if ui.checkbox(&mut self.settings.show_key_bar, "Show the function-key bar (F2 Rename, F3 View…)").changed() {
+                            self.dirty = true;
+                        }
+                        ui.end_row();
+
                         ui.label("Folders");
                         if ui.checkbox(&mut self.settings.show_dotdot, "Show “..” at the top to go up a level").changed() {
                             for p in &mut self.panes {
@@ -407,6 +521,15 @@ impl App {
             }
         }
 
+        if batch_ok && !close {
+            if let Modal::BatchRename { dir, items, rules, .. } = modal {
+                if let Ok(news) = crate::rename::new_names(&items, &rules) {
+                    let olds = items.into_iter().map(|i| i.name).collect();
+                    self.apply_batch_rename(dir, olds, news);
+                }
+            }
+            return;
+        }
         if pack_ok && !close {
             if let Modal::Pack { path, format, level, separate, delete_after, sources, .. } = modal {
                 self.submit_pack(&path, format, level, separate, delete_after, sources);

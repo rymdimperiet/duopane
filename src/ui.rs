@@ -9,6 +9,14 @@ use std::time::Duration;
 
 impl App {
     pub(crate) fn bottom_bar(&mut self, ctx: &egui::Context) {
+        if self.settings.show_key_bar {
+            self.key_bar(ctx);
+        }
+        self.status_bar(ctx);
+    }
+
+    /// The function-key bar at the very bottom (can be hidden in Appearance).
+    fn key_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("keys")
             .frame(egui::Frame::default().fill(theme::c().header).inner_margin(egui::Margin::symmetric(8, 4)))
             .show(ctx, |ui| {
@@ -35,6 +43,10 @@ impl App {
                 });
             });
 
+    }
+
+    /// Messages, progress of file operations and the name search.
+    fn status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status")
             .frame(egui::Frame::default().fill(theme::c().bg).inner_margin(egui::Margin::symmetric(10, 4)))
             .show(ctx, |ui| {
@@ -70,9 +82,6 @@ impl App {
                             ui.label(egui::RichText::new(&s.text).color(if s.error { theme::c().error } else { theme::c().ok }));
                         }
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new("F1 Shortcuts").color(theme::c().dim).small());
-                    });
                 });
             });
     }
@@ -309,8 +318,11 @@ fn row_ui(
     let (c_name, c_size, c_date) = columns(rect, widths);
     let icon = if e.is_dir { "🗀" } else { "🗋" };
     painter.text(pos2(c_name.left() + 8.0, y), Align2::LEFT_CENTER, icon, font.clone(), color.gamma_multiply(0.8));
-    let name = if e.is_symlink { format!("{} ↗", e.name) } else { e.name.clone() };
-    painter.with_clip_rect(c_name).text(pos2(c_name.left() + name_indent(font.size), y), Align2::LEFT_CENTER, name, font.clone(), color);
+    let name_x = c_name.left() + name_indent(font.size);
+    let suffix = if e.is_symlink { " ↗" } else { "" };
+    let (shown, truncated) = fit_name(ui, &e.name, suffix, e.is_dir, c_name.right() - name_x - 4.0, font);
+    painter.with_clip_rect(c_name).text(pos2(name_x, y), Align2::LEFT_CENTER, shown, font.clone(), color);
+    let r = if truncated { r.on_hover_text(&e.name) } else { r };
     if !e.is_dir {
         painter.text(pos2(c_size.right() - 4.0, y), Align2::RIGHT_CENTER, human_size(e.size), small.clone(), theme::c().dim);
     }
@@ -358,6 +370,53 @@ fn row_ui(
             }
         }
     });
+}
+
+/// Shortens a name to fit `max_w`, cutting the start of the name so the end and the
+/// extension stay visible ("holiday-pho…summer.jpg"). Returns (text, was shortened).
+pub(crate) fn fit_name(ui: &egui::Ui, name: &str, suffix: &str, is_dir: bool, max_w: f32, font: &FontId) -> (String, bool) {
+    let width = |s: &str| ui.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x);
+    let full = format!("{name}{suffix}");
+    if max_w <= 0.0 || width(&full) <= max_w {
+        return (full, false);
+    }
+    let chars: Vec<char> = name.chars().collect();
+    // Keep the extension (files only) plus a few characters before it.
+    let ext_len = if is_dir {
+        0
+    } else {
+        name.rfind('.').filter(|&i| i > 0).map(|i| name[i..].chars().count()).unwrap_or(0)
+    };
+    let tail_keep = (ext_len + 6).min(chars.len());
+    let build = |head: usize, tail: usize| -> String {
+        let h: String = chars[..head].iter().collect();
+        let t: String = chars[chars.len() - tail..].iter().collect();
+        format!("{h}…{t}{suffix}")
+    };
+    // Shrink the start first; if even that doesn't fit, shrink the kept end too.
+    let max_head = chars.len().saturating_sub(tail_keep);
+    let (mut lo, mut hi) = (0usize, max_head);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width(&build(mid, tail_keep)) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if lo > 0 || width(&build(0, tail_keep)) <= max_w {
+        return (build(lo, tail_keep), true);
+    }
+    let (mut lo, mut hi) = (1usize, tail_keep);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width(&build(0, mid)) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    (build(0, lo), true)
 }
 
 /// A small triangle pointing up (ascending) or down.

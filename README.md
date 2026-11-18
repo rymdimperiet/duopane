@@ -42,18 +42,20 @@ The finished program is `target/release/duopane`. Copy it anywhere on your `PATH
 | F2 or Shift+F6 | Rename |
 | Alt+F5 | **Pack** (compress) the selection into a ZIP, TAR.GZ or TAR archive |
 | Alt+F9 | **Unpack** the selected archives |
+| Ctrl+M | **Batch rename** the selection (or the whole folder) |
 | F7 | New folder (`a/b/c` makes nested folders) |
 | Shift+F4 | New file |
 | F3 | **Lister**: view the file (see below) |
 | F4 | Edit the file |
 | F8 or Delete | Move to the trash |
 | Shift+F8 or Shift+Delete | Delete permanently |
+| Ctrl+F3 / F4 / F5 / F6 | Sort by name / type / date / size (press again to reverse) |
 | Ctrl+. or Ctrl+H | Show / hide hidden files |
 | Ctrl+L | Type a location |
 | Ctrl+B | Bookmark this folder (bookmarks rank first in Go to) |
 | (command palette) | History: previous / next folder |
 | Ctrl+Left / Ctrl+Right | Open the folder under the cursor in the left / right pane |
-| Ctrl+M | Show this folder in the other pane |
+| Ctrl+Shift+M | Show this folder in the other pane |
 | Ctrl+U | Swap the panes |
 | Ctrl+Shift+C | Copy the selected paths to the clipboard |
 | Ctrl+Shift+S | Calculate the size of the selection |
@@ -78,6 +80,17 @@ back up and out. F3 views and Enter opens a file inside (it's unpacked to a
 temporary folder that's removed when Duopane closes), F5 copies the selection out
 to the other pane. Renaming, deleting and adding files inside an archive aren't
 supported yet.
+
+## Batch rename (Ctrl+M)
+
+Renames the selected items (or everything in the folder) using patterns, like
+Double Commander's multi-rename tool. The name and extension patterns can use
+`[N]` the old name, `[N2-5]` characters 2 to 5 of it, `[E]` the extension,
+`[C]` a counter (start, step and number of digits are adjustable), `[P]` the
+folder's name, and `[Y] [M] [D] [h] [m] [s]` the date and time the file was
+changed. Find & replace (optionally with a regular expression) and a case change
+are applied after that. A live preview shows every new name and flags clashes;
+"Undo the last batch rename" in the command palette puts the old names back.
 
 ## The lister (F3)
 
@@ -130,7 +143,8 @@ cursor, cursor_inactive, error, ok, stripe (every other row).
 
 Every folder starts with a “..” row (Enter on it goes up a level); it can't be
 selected, renamed, copied or deleted. Both it and the striped rows can be turned
-off in Appearance. New schemes go in `src/theme.rs`.
+off in Appearance, and so can the function-key bar at the bottom (also from the
+command palette: “Show / hide the function-key bar”). New schemes go in `src/theme.rs`.
 
 ## Settings
 

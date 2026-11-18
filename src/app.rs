@@ -53,6 +53,14 @@ pub enum Modal {
         sources: Vec<PathBuf>,
         first: bool,
     },
+    /// Batch rename (Ctrl+M).
+    BatchRename {
+        dir: PathBuf,
+        items: Vec<crate::rename::Item>,
+        others: std::collections::HashSet<String>,
+        rules: crate::rename::Rules,
+        first: bool,
+    },
     /// Unpack archives (Alt+F9).
     Unpack { archives: Vec<PathBuf>, dest: String, into_folder: bool, first: bool },
 }
@@ -83,6 +91,8 @@ pub struct App {
     pub(crate) size_rx: Option<mpsc::Receiver<(usize, u64)>>,
     /// The F3 viewer, when open (it takes over the window).
     pub(crate) lister: Option<crate::lister::Lister>,
+    /// The last batch rename: folder and (new name, old name) pairs, for undo.
+    pub(crate) last_batch: Option<(PathBuf, Vec<(String, String)>)>,
 }
 
 impl App {
@@ -124,6 +134,7 @@ impl App {
             actions: Vec::new(),
             size_rx: None,
             lister: None,
+            last_batch: None,
         };
         app.rebuild_bindings();
         if let Some(e) = settings_error {

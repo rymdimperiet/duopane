@@ -65,6 +65,8 @@ pub struct Settings {
     pub lister_wrap: bool,
     /// Alternate the brightness of rows in the file lists.
     pub striped_rows: bool,
+    /// Show the function-key bar (F2 Rename, F3 View, ...) at the bottom.
+    pub show_key_bar: bool,
     /// Show a ".." row at the top of every folder.
     pub show_dotdot: bool,
     /// Lister: playback volume, 0.0 to 1.0.
@@ -103,6 +105,7 @@ impl Default for Settings {
             mono_font: String::new(),
             lister_wrap: false,
             striped_rows: true,
+            show_key_bar: true,
             show_dotdot: true,
             volume: 0.8,
             confirm_delete: true,

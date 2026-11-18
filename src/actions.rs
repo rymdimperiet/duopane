@@ -187,6 +187,92 @@ impl App {
         self.start_job(JobSpec::Unpack { archives, dest, into_folder });
     }
 
+    /// Ctrl+M: rename many files at once with patterns.
+    pub fn ask_batch_rename(&mut self) {
+        if self.refuse_in_archive("Renaming") {
+            return;
+        }
+        let pane = &self.panes[self.active];
+        let chosen: Vec<&crate::pane::Entry> = if pane.selected.is_empty() {
+            pane.entries.iter().filter(|e| !e.is_up()).collect()
+        } else {
+            pane.entries.iter().filter(|e| pane.selected.contains(&e.name)).collect()
+        };
+        if chosen.is_empty() {
+            return self.set_status("Nothing to rename here", true);
+        }
+        let items: Vec<crate::rename::Item> =
+            chosen.iter().map(|e| crate::rename::Item { name: e.name.clone(), is_dir: e.is_dir, modified: e.modified }).collect();
+        let dir = pane.path.clone();
+        let taken: std::collections::HashSet<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        // Every other name in the folder, hidden ones too, so clashes are caught.
+        let others = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| !taken.contains(n.as_str())).collect())
+            .unwrap_or_default();
+        let parent = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let rules = crate::rename::Rules { parent, ..Default::default() };
+        self.modal = Some(Modal::BatchRename { dir, items, others, rules, first: true });
+    }
+
+    /// Renames in two steps (to temporary names, then to the new ones) so names can be swapped.
+    /// Returns the (new, old) pairs that succeeded, and any errors.
+    fn rename_pairs(dir: &Path, pairs: &[(String, String)]) -> (Vec<(String, String)>, Vec<String>) {
+        let mut errors = Vec::new();
+        let mut temps = Vec::new();
+        for (i, (old, _)) in pairs.iter().enumerate() {
+            let tmp = format!(".duopane-rename-{}-{i}", std::process::id());
+            match std::fs::rename(dir.join(old), dir.join(&tmp)) {
+                Ok(()) => temps.push(Some(tmp)),
+                Err(e) => {
+                    errors.push(format!("{old}: {e}"));
+                    temps.push(None);
+                }
+            }
+        }
+        let mut done = Vec::new();
+        for ((old, new), tmp) in pairs.iter().zip(temps) {
+            let Some(tmp) = tmp else { continue };
+            match std::fs::rename(dir.join(&tmp), dir.join(new)) {
+                Ok(()) => done.push((new.clone(), old.clone())),
+                Err(e) => {
+                    errors.push(format!("{old} → {new}: {e}"));
+                    let _ = std::fs::rename(dir.join(&tmp), dir.join(old)); // put it back
+                }
+            }
+        }
+        (done, errors)
+    }
+
+    pub(crate) fn apply_batch_rename(&mut self, dir: PathBuf, olds: Vec<String>, news: Vec<String>) {
+        let pairs: Vec<(String, String)> = olds.into_iter().zip(news).filter(|(o, n)| o != n).collect();
+        if pairs.is_empty() {
+            return self.set_status("Nothing changes with these settings", false);
+        }
+        let (done, errors) = Self::rename_pairs(&dir, &pairs);
+        let n = done.len();
+        self.last_batch = Some((dir, done));
+        self.reload_all();
+        if errors.is_empty() {
+            self.set_status(format!("Renamed {} (undo from the command palette)", plural(n, "item")), false);
+        } else {
+            self.set_status(format!("Renamed {n}, {} failed", errors.len()), true);
+            self.modal = Some(Modal::Message { title: "Some items couldn't be renamed".into(), text: errors.join("\n") });
+        }
+    }
+
+    pub fn undo_batch_rename(&mut self) {
+        let Some((dir, done)) = self.last_batch.take() else {
+            return self.set_status("No batch rename to undo", true);
+        };
+        let (undone, errors) = Self::rename_pairs(&dir, &done);
+        self.reload_all();
+        if errors.is_empty() {
+            self.set_status(format!("Undid the rename of {}", plural(undone.len(), "item")), false);
+        } else {
+            self.modal = Some(Modal::Message { title: "Some names couldn't be put back".into(), text: errors.join("\n") });
+        }
+    }
+
     /// F12: colour scheme and fonts.
     pub fn open_appearance(&mut self) {
         self.modal = Some(Modal::Appearance { ui_filter: String::new(), mono_filter: String::new() });

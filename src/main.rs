@@ -12,6 +12,7 @@
 //! - `settings.rs` – the settings file (paths, bookmarks, key bindings, custom commands)
 //! - `lister.rs`   – the F3 viewer (text, pictures, PDF, music, video); loading in
 //!                   `lister_load.rs`, playback in `media.rs`
+//! - `rename.rs`   – batch rename patterns ([N], [E], [C], ...) and clash checks
 //! - `fuzzy.rs`    – the fuzzy matcher used by "Go to" and the command palette
 //! - `theme.rs`    – colour schemes, fonts and sizes
 
@@ -26,6 +27,7 @@ mod lister_load;
 mod media;
 mod fuzzy;
 mod pane;
+mod rename;
 mod settings;
 mod theme;
 mod ui;

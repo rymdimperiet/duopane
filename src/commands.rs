@@ -43,6 +43,10 @@ pub fn builtin() -> Vec<Command> {
         cmd!("edit", "Edit file", ["F4"], |a, _| a.edit_cursor()),
         cmd!("delete", "Move to trash", ["F8", "Delete"], |a, _| a.ask_delete(false)),
         cmd!("delete_permanently", "Delete permanently", ["Shift+F8", "Shift+Delete"], |a, _| a.ask_delete(true)),
+        cmd!("toggle_key_bar", "Show / hide the function-key bar", [], |a, _| {
+            a.settings.show_key_bar = !a.settings.show_key_bar;
+            a.dirty = true;
+        }),
         cmd!("toggle_hidden", "Show / hide hidden files", ["Ctrl+Period", "Ctrl+H"], |a, _| a.toggle_hidden()),
         cmd!("reload", "Reload both panes", ["Ctrl+R"], |a, _| a.reload_all()),
         cmd!("select_all", "Select all", ["Ctrl+A"], |a, _| a.active_pane().select_all()),
@@ -55,7 +59,9 @@ pub fn builtin() -> Vec<Command> {
         cmd!("forward", "History: next folder", [], |a, _| a.forward()),
         cmd!("open_in_left", "Open folder in the left pane", ["Ctrl+Left"], |a, _| a.open_in(0)),
         cmd!("open_in_right", "Open folder in the right pane", ["Ctrl+Right"], |a, _| a.open_in(1)),
-        cmd!("mirror", "Show this folder in the other pane", ["Ctrl+M"], |a, _| a.mirror()),
+        cmd!("mirror", "Show this folder in the other pane", ["Ctrl+Shift+M"], |a, _| a.mirror()),
+        cmd!("batch_rename", "Batch rename…", ["Ctrl+M"], |a, _| a.ask_batch_rename()),
+        cmd!("undo_batch_rename", "Undo the last batch rename", [], |a, _| a.undo_batch_rename()),
         cmd!("swap_panes", "Swap the two panes", ["Ctrl+U"], |a, _| a.swap_panes()),
         cmd!("edit_path", "Type a location…", ["Ctrl+L"], |a, _| a.edit_path()),
         cmd!("copy_path", "Copy path to clipboard", ["Ctrl+Shift+C"], |a, ctx| a.copy_paths(ctx)),
@@ -63,10 +69,11 @@ pub fn builtin() -> Vec<Command> {
         cmd!("add_bookmark", "Bookmark this folder", ["Ctrl+B"], |a, _| a.add_bookmark()),
         cmd!("remove_bookmark", "Remove bookmark for this folder", [], |a, _| a.remove_bookmark()),
         cmd!("home", "Go to home folder", ["Alt+Home"], |a, _| a.go_home()),
-        cmd!("sort_name", "Sort by name", [], |a, _| a.sort_by(SortKey::Name)),
-        cmd!("sort_size", "Sort by size", [], |a, _| a.sort_by(SortKey::Size)),
-        cmd!("sort_modified", "Sort by date modified", [], |a, _| a.sort_by(SortKey::Modified)),
-        cmd!("sort_extension", "Sort by file type", [], |a, _| a.sort_by(SortKey::Extension)),
+        // Same keys as Double Commander; pressing one again reverses the order.
+        cmd!("sort_name", "Sort by name", ["Ctrl+F3"], |a, _| a.sort_by(SortKey::Name)),
+        cmd!("sort_extension", "Sort by file type", ["Ctrl+F4"], |a, _| a.sort_by(SortKey::Extension)),
+        cmd!("sort_modified", "Sort by date modified", ["Ctrl+F5"], |a, _| a.sort_by(SortKey::Modified)),
+        cmd!("sort_size", "Sort by size", ["Ctrl+F6"], |a, _| a.sort_by(SortKey::Size)),
         cmd!("folder_size", "Calculate size of selection", ["Ctrl+Shift+S"], |a, _| a.calculate_size()),
         cmd!("cancel_job", "Cancel the running file operation", [], |a, _| a.cancel_job()),
         cmd!("edit_settings", "Edit settings file", ["Ctrl+Comma"], |a, _| a.edit_settings()),

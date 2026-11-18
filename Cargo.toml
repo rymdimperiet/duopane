@@ -25,6 +25,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Pack / unpack (Alt+F5 / Alt+F9)
 tar = "0.4"
 flate2 = "1"
+# Batch rename: regular-expression find & replace
+regex = "1"
 rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
 # Appearance: list and load the fonts installed on the system
 fontdb = "0.23"

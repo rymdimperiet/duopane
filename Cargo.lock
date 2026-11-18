@@ -1025,6 +1025,7 @@ dependencies = [
  "fontdb",
  "image",
  "open",
+ "regex",
  "rodio",
  "serde",
  "serde_json",

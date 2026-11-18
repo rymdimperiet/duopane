@@ -126,8 +126,6 @@ impl Lister {
             .frame(egui::Frame::default().fill(th.header).inner_margin(egui::Margin::symmetric(10, 6)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&self.name).strong());
-                    ui.label(egui::RichText::new(self.describe()).color(th.dim).small());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Close  Esc").clicked() {
                             action = ListerAction::Close;
@@ -162,6 +160,19 @@ impl Lister {
                                 self.reopen(m);
                             }
                         }
+                        ui.separator();
+                        // Whatever room is left goes to the file name (shortened in the
+                        // middle, keeping its extension) and then the details.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let room = ui.available_width();
+                            let font = egui::TextStyle::Body.resolve(ui.style());
+                            let (shown, cut) = crate::ui::fit_name(ui, &self.name, "", false, (room * 0.65).max(60.0), &font);
+                            let r = ui.add(egui::Label::new(egui::RichText::new(shown).strong()).truncate());
+                            if cut {
+                                r.on_hover_text(&self.name);
+                            }
+                            ui.add(egui::Label::new(egui::RichText::new(self.describe()).color(th.dim).small()).truncate());
+                        });
                     });
                 });
             });
