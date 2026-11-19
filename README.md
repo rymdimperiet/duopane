@@ -1,9 +1,23 @@
 # Duopane
 
-A fast, keyboard-driven, dual-pane file manager written in Rust. It's inspired by
-the way fman works (two folders side by side, everything reachable from the
-keyboard, a fuzzy "Go to" and a command palette) and was written from scratch,
-so it's yours to rename, change and extend.
+A fast, keyboard-driven, dual-pane file manager for Linux, written in Rust.
+
+It works the way fman does (two folders side by side, a fuzzy "Go to" and a
+command palette, everything a keystroke away) and adds the power tools Double
+Commander users rely on:
+
+- **F-key commands** for rename, view, edit, copy, move and pack, shown in a bar
+  at the bottom (hold Alt, Shift or Ctrl to see the rest)
+- **Copies and moves in the background**, with Double Commander's overwrite
+  choices when a file is already there (Overwrite All Older, Compare by content…)
+- **Zip and tar archives you browse like folders**
+- **Batch rename** with patterns and regular expressions, with undo
+- **A built-in viewer** (F3) for text, code, pictures, PDFs, Markdown, music and video
+- **Drag and drop** between the panes and with other apps, natively on Wayland
+- **Colour schemes, any installed font and weight**, and keys you can rebind
+
+**Download:** an AppImage from the [Releases](https://github.com/rymdimperiet/duopane/releases)
+page, or build it yourself (below).
 
 ![Duopane: two folders side by side](docs/screenshot.png)
 
@@ -83,9 +97,38 @@ the bottom (for example Alt: Pack and Unpack; Ctrl: the sort keys).
 The mouse works too: click, Ctrl+click and Shift+click select, a double-click opens,
 right-click opens a menu, and clicking a column header sorts by it.
 
+### Drag and drop
+
+- **Between the panes:** drag a file (or a selected group) onto the other pane, or
+  onto any folder (`..` too). The usual Copy dialog opens with the destination
+  filled in; press Enter. Hold **Shift** when you let go to move instead (the
+  pointer loses its plus, like in Double Commander). Escape cancels a drag.
+- **Out to other apps** (a browser, mail, Dolphin…): on a Wayland desktop, just
+  drag the files onto the other app, even one that overlaps Duopane's window,
+  and drop them. Hold Shift over a file manager to move them there instead (the
+  file manager does the moving; Duopane itself never deletes anything when a
+  drag ends).
+  This is new and experimental: if it misbehaves, start Duopane with
+  `DUOPANE_NO_NATIVE_DRAG=1` to turn it off, and `DUOPANE_DEBUG_DRAG=1` to see what
+  happens on the terminal. On X11 (or as a fallback), right-click → *Drag to
+  another app…* opens the files in a small drag window instead; that needs
+  [ripdrag](https://github.com/nik012003/ripdrag) or
+  [dragon-drop](https://github.com/mwh/dragon) installed.
+- **In from other apps:** drop files on a pane and the Copy dialog opens with
+  that pane's folder filled in. This works on Wayland and X11.
+
 Copies and moves run in the background with a progress bar; you can cancel them
-and start more (they queue up). If something already exists at the destination
-you're asked whether to replace it or skip it.
+and start more (they queue up).
+
+When a file is already there, the job pauses and shows both files (path, size,
+date) with Double Commander's choices: **Overwrite**, **Skip**, **Rename…** (give
+the new file another name), **Overwrite All**, **Skip All**, **Compare by
+content** (are they identical?), **Overwrite All Older**, **Cancel**, and under
+**Other**: overwrite all smaller or all larger, or auto-rename all new or all
+existing files. The "All" choices apply to the rest of that job. The keyboard
+focus starts on Skip, so a stray Enter never overwrites anything. Folders that
+meet are merged, and you're asked about each file inside. The same applies to
+unpacking archives and copying files out of them.
 
 ## Archives as folders
 
@@ -148,8 +191,10 @@ viewers, and if one fails the built-in viewer is used instead. Examples:
 
 Choose a colour scheme (Duopane Dark/Light, Commander Blue, Solarized Dark, Nord,
 Gruvbox Dark, High Contrast) and any font installed on your computer, for the
-interface and for the lister's monospace text. Changes apply at once. Single
-colours can be overridden in the settings file:
+interface and for the lister's monospace text, in any weight it's installed in
+(Light, Regular, Medium, Bold…). With striped rows on, *Row contrast* sets how
+much every other row stands out. Changes apply at once. Single colours can be
+overridden in the settings file:
 
 ```json
 "custom_colors": { "folder": "#ffcc00", "cursor": "#30507a" }
@@ -210,13 +255,39 @@ The code is small and split by job:
 The window uses [egui](https://github.com/emilk/egui) through `eframe`, which runs
 on Linux, Windows and macOS.
 
+### A demo folder for screenshots
+
+`scripts/demo.sh` builds a made-up home folder (projects, documents, holiday
+pictures, music, archives…) and starts Duopane in it, with its own settings, so
+screenshots don't show your real files or paths. `--rebuild` starts it over.
+
 ### Ideas for next steps
 
 - Tabs per pane, or a quick-look preview of the selected file
-- Batch rename with a pattern
-- Archives (zip/tar) opened like folders
 - Remote locations (SFTP) as extra "file systems"
 - A plugin system that loads scripts at startup
+
+## Status and known limitations
+
+Duopane is young. It's in daily use on Linux (KDE Plasma on Wayland) and has a
+test suite, but expect rough edges, and please report them.
+
+- **Linux only, for now.** egui also runs on macOS and Windows, but Duopane hasn't
+  been built or tested there; the trash, opening files and dragging to other apps
+  would need work.
+- **Desktops:** developed on KDE Plasma (Wayland). X11 and other desktops should
+  work but are less tested. On X11, dragging files to other apps goes through
+  ripdrag or dragon-drop.
+- **Not there yet:** tabs, searching for files in subfolders, remote locations
+  (SFTP and the like, beyond what's mounted), and a side-by-side file comparison.
+- **The viewer leans on other tools** for some files: poppler for PDFs, ffmpeg for video.
+- Variable fonts only offer their default weight.
+
+## How it was made
+
+Duopane was built with [Claude Code](https://claude.com/claude-code), Anthropic's
+AI coding assistant. I set the direction, the design and the priorities, and use
+and test it daily; most of the code was written by Claude.
 
 ## Licence
 
