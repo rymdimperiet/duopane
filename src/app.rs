@@ -23,6 +23,8 @@ pub enum Action {
     Run(CmdRef),
     RunId(&'static str),
     Navigate(usize, PathBuf),
+    /// Files dropped with the mouse: (from pane, onto pane, files, destination folder, move).
+    Drop { from: Option<usize>, to: usize, paths: Vec<PathBuf>, dest: PathBuf, mv: bool },
 }
 
 pub enum InputPurpose {
@@ -63,6 +65,8 @@ pub enum Modal {
     },
     /// Unpack archives (Alt+F9).
     Unpack { archives: Vec<PathBuf>, dest: String, into_folder: bool, first: bool },
+    /// A running job found a file already where it's going.
+    Conflict(crate::dialogs::ConflictDialog),
 }
 
 pub struct Status {
@@ -95,6 +99,13 @@ pub struct App {
     pub(crate) last_batch: Option<(PathBuf, Vec<(String, String)>)>,
     /// Where the two panes were drawn last frame (the status note floats over it).
     pub(crate) panes_rect: Option<egui::Rect>,
+    /// Drags out of the window into other apps (Wayland only; see `native_drag.rs`).
+    #[cfg(target_os = "linux")]
+    native_drag: Option<crate::native_drag::NativeDrag>,
+    /// A drag of ours is in the desktop's hands (see `hand_drag_to_desktop`).
+    native_dragging: bool,
+    /// Files from another app are being dragged over the window.
+    foreign_hover: bool,
 }
 
 impl App {
@@ -140,6 +151,10 @@ impl App {
             lister: None,
             last_batch: None,
             panes_rect: None,
+            #[cfg(target_os = "linux")]
+            native_drag: native_drag(cc),
+            native_dragging: false,
+            foreign_hover: false,
         };
         app.rebuild_bindings();
         if let Some(e) = settings_error {
@@ -208,6 +223,8 @@ impl App {
 
     pub(crate) fn after_move(&mut self, idx: usize, res: Result<(), String>) {
         match res {
+            // Still reading in the background: this runs again when it arrives.
+            Ok(()) if self.panes[idx].is_loading() => {}
             Ok(()) => {
                 if self.panes[idx].archive.is_none() {
                     let p = self.panes[idx].path.clone();
@@ -293,16 +310,33 @@ impl App {
                         });
                     }
                 }
+                if matches!(self.modal, Some(Modal::Conflict(_))) {
+                    self.modal = None; // the job ended (e.g. cancelled) while asking
+                }
                 self.reload_all();
                 if let Some(next) = self.queue.pop_front() {
                     self.job = Some(fs_ops::start(next));
                 }
             }
         }
+        // A job asks about a file that's already there. (If another dialog is open,
+        // the question waits until it closes; the job waits too.)
+        if let (Some(job), None) = (&mut self.job, &self.modal) {
+            if let Some(q) = job.conflict.take() {
+                self.modal = Some(Modal::Conflict(crate::dialogs::ConflictDialog::new(q)));
+            }
+        }
         if let Some(rx) = &self.size_rx {
             if let Ok((n, bytes)) = rx.try_recv() {
                 self.size_rx = None;
                 self.set_status(format!("{}: {}", plural(n, "item"), human_size(bytes)), false);
+            }
+        }
+        for i in 0..2 {
+            match self.panes[i].poll_loading() {
+                Some(Ok(true)) => self.after_move(i, Ok(())),
+                Some(Ok(false)) | None => {}
+                Some(Err(e)) => self.set_status(e, true),
             }
         }
         if self.last_check.elapsed() > Duration::from_millis(1000) {
@@ -446,6 +480,7 @@ impl App {
                 self.active = i;
                 self.navigate(i, &p);
             }
+            Action::Drop { from, to, paths, dest, mv } => self.drop_files(from, to, paths, dest, mv),
         }
     }
 
@@ -466,6 +501,44 @@ impl App {
             crate::lister::ListerAction::Prev => self.lister_step(-1),
         }
         ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    /// A file drag that starts in a pane is handed to the desktop straight away,
+    /// so the compositor decides where it's dropped: on another app (even one
+    /// overlapping ours) or back on a pane (which `raw_input_hook` passes on).
+    fn hand_drag_to_desktop(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(nd) = &self.native_drag else { return };
+            if self.native_dragging || !nd.can_start() {
+                return;
+            }
+            let Some(p) = egui::DragAndDrop::payload::<crate::ui::DragPayload>(ctx) else { return };
+            // Files inside an archive aren't real files yet: those drags stay in the window.
+            if self.panes[p.from].archive.is_none() && nd.start(&p.paths) {
+                self.native_dragging = true;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = ctx;
+    }
+
+    /// Files dropped onto the window from another app go to the pane they were
+    /// dropped on (or the active pane when the position isn't known).
+    /// Only some systems deliver these; see the README.
+    fn files_dropped_in(&mut self, ctx: &egui::Context) {
+        let (paths, pos) = ctx.input(|i| {
+            (i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>(), i.pointer.hover_pos())
+        });
+        if paths.is_empty() || self.modal.is_some() {
+            return;
+        }
+        let to = match (pos, self.panes_rect) {
+            (Some(p), Some(r)) => usize::from(p.x > r.center().x),
+            _ => self.active,
+        };
+        let dest = self.panes[to].path.clone();
+        self.actions.push(Action::Drop { from: None, to, paths, dest, mv: false });
     }
 
     fn update_title(&mut self, ctx: &egui::Context) {
@@ -489,6 +562,20 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// While the desktop runs a drag, the window gets no pointer events; the
+    /// drag's own events are turned into them here, so egui sees the drag move
+    /// over the panes and be dropped (or end elsewhere) as if it were its own.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        #[cfg(target_os = "linux")]
+        if let Some(nd) = &self.native_drag {
+            nd.set_move(raw.modifiers.shift);
+            let events = nd.events();
+            drag_events_to_input(events, raw, ctx.zoom_factor(), &mut self.native_dragging, &mut self.foreign_hover);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (ctx, raw);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background();
         if self.lister.is_some() {
@@ -498,15 +585,17 @@ impl eframe::App for App {
             return;
         }
         self.handle_keys(ctx);
+        self.files_dropped_in(ctx);
         self.bottom_bar(ctx);
         self.panes_ui(ctx);
         self.modal_ui(ctx);
+        self.hand_drag_to_desktop(ctx);
         for a in std::mem::take(&mut self.actions) {
             self.apply(ctx, a);
         }
         self.update_title(ctx);
         self.save_if_dirty();
-        let busy = self.job.is_some() || self.size_rx.is_some();
+        let busy = self.job.is_some() || self.size_rx.is_some() || self.panes.iter().any(Pane::is_loading);
         ctx.request_repaint_after(Duration::from_millis(if busy { 100 } else { 1000 }));
     }
 }
@@ -518,6 +607,70 @@ impl Drop for App {
         self.store_pane_state();
         let _ = self.settings.save();
     }
+}
+
+/// Turns the desktop's drag events into egui input (see `App::raw_input_hook`).
+/// `dragging`: one of our drags is in the desktop's hands; `hover`: files from
+/// another app are over the window.
+#[cfg(target_os = "linux")]
+pub(crate) fn drag_events_to_input(
+    events: Vec<crate::native_drag::DragEvent>,
+    raw: &mut egui::RawInput,
+    zoom: f32,
+    dragging: &mut bool,
+    hover: &mut bool,
+) {
+    use crate::native_drag::DragEvent;
+    let to_points = |x: f64, y: f64| egui::pos2(x as f32, y as f32) / zoom;
+    let mods = raw.modifiers;
+    let release = |pos| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: mods };
+    for e in events {
+        match e {
+            DragEvent::Motion { x, y, ours } => {
+                raw.events.push(Event::PointerMoved(to_points(x, y)));
+                *hover = !ours;
+            }
+            DragEvent::Leave => {
+                raw.events.push(Event::PointerGone);
+                *hover = false;
+            }
+            DragEvent::DropOurs { x, y } => {
+                let pos = to_points(x, y);
+                raw.events.push(Event::PointerMoved(pos));
+                raw.events.push(release(pos));
+                *dragging = false;
+            }
+            DragEvent::DropFiles { paths, x, y } => {
+                raw.events.push(Event::PointerMoved(to_points(x, y)));
+                raw.dropped_files.extend(paths.into_iter().map(|p| egui::DroppedFile { path: Some(p), ..Default::default() }));
+                *hover = false;
+            }
+            // Dropped in another app or cancelled: end egui's side of the drag,
+            // released far away so no pane takes it.
+            DragEvent::Ended if *dragging => {
+                raw.events.push(Event::PointerGone);
+                raw.events.push(release(egui::pos2(-10_000.0, -10_000.0)));
+                *dragging = false;
+            }
+            DragEvent::Ended => {}
+        }
+    }
+    if *hover {
+        raw.hovered_files.push(egui::HoveredFile::default());
+    }
+}
+
+/// Sets up dragging into other apps, when on Wayland (and not turned off with
+/// `DUOPANE_NO_NATIVE_DRAG=1`).
+#[cfg(target_os = "linux")]
+fn native_drag(cc: &eframe::CreationContext<'_>) -> Option<crate::native_drag::NativeDrag> {
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+    if std::env::var_os("DUOPANE_NO_NATIVE_DRAG").is_some_and(|v| v != "0") {
+        return None;
+    }
+    let display = cc.display_handle().ok()?.as_raw();
+    let window = cc.window_handle().ok()?.as_raw();
+    crate::native_drag::NativeDrag::new(display, window, cc.egui_ctx.clone())
 }
 
 // ----- small utilities -----------------------------------------------------

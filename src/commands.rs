@@ -65,6 +65,7 @@ pub fn builtin() -> Vec<Command> {
         cmd!("swap_panes", "Swap the two panes", ["Ctrl+U"], |a, _| a.swap_panes()),
         cmd!("edit_path", "Type a location…", ["Ctrl+L"], |a, _| a.edit_path()),
         cmd!("copy_path", "Copy path to clipboard", ["Ctrl+Shift+C"], |a, ctx| a.copy_paths(ctx)),
+        cmd!("drag_out", "Drag to another app…", [], |a, _| a.drag_out()),
         cmd!("open_terminal", "Open terminal here", ["F9"], |a, _| a.open_terminal()),
         cmd!("add_bookmark", "Bookmark this folder", ["Ctrl+B"], |a, _| a.add_bookmark()),
         cmd!("remove_bookmark", "Remove bookmark for this folder", [], |a, _| a.remove_bookmark()),

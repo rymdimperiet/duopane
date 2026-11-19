@@ -184,7 +184,7 @@ impl App {
         if let Err(e) = std::fs::create_dir_all(&dest) {
             return self.set_status(format!("Couldn't create {}: {e}", dest.display()), true);
         }
-        self.start_job(JobSpec::Unpack { archives, dest, into_folder });
+        self.start_job(JobSpec::Unpack { archives, dest, into_folder, policy: ConflictPolicy::Ask });
     }
 
     /// Ctrl+M: rename many files at once with patterns.
@@ -431,9 +431,15 @@ impl App {
         if self.refuse_other_in_archive() {
             return;
         }
-        let dest = tilde(&self.panes[self.other()].path);
-        let pane = &self.panes[self.active];
-        if let Some(a) = &pane.archive {
+        let dest = self.panes[self.other()].path.clone();
+        self.ask_transfer_to(mv, sources, &dest, Some(self.active));
+    }
+
+    /// The Copy / Move dialog for `sources`, with `dest` filled in. `from` is the
+    /// pane they come from, if any (files dropped in from another app have none).
+    fn ask_transfer_to(&mut self, mv: bool, sources: Vec<PathBuf>, dest: &Path, from: Option<usize>) {
+        let dest = tilde(dest);
+        if let Some((pane, a)) = from.map(|i| &self.panes[i]).and_then(|p| p.archive.as_ref().map(|a| (p, a))) {
             if mv {
                 return self.set_status("Moving out of an archive isn't possible; F5 copies files out", true);
             }
@@ -445,6 +451,55 @@ impl App {
         }
         let title = format!("{} {} to:", if mv { "Move" } else { "Copy" }, describe(&sources));
         self.ask(title, "Folder (or a new name)", dest, InputPurpose::Transfer { mv, sources }, None);
+    }
+
+    /// Files dragged with the mouse and dropped on a pane or a folder in one.
+    /// Opens the Copy (or, with Shift, Move) dialog with the destination filled in,
+    /// so a stray drop never moves anything by itself.
+    pub(crate) fn drop_files(&mut self, from: Option<usize>, to: usize, sources: Vec<PathBuf>, dest: PathBuf, mv: bool) {
+        if self.panes[to].archive.is_some() {
+            return self.set_status("Files can't be put into an archive that way yet", true);
+        }
+        // Dropped on itself, or into the folder it's already in: nothing to do.
+        let sources: Vec<PathBuf> = sources.into_iter().filter(|s| *s != dest && s.parent() != Some(dest.as_path())).collect();
+        if sources.is_empty() {
+            return;
+        }
+        if let Some(i) = from {
+            self.active = i;
+        }
+        self.ask_transfer_to(mv, sources, &dest, from);
+    }
+
+    /// Hands the selected files to a small drag-source window (ripdrag or
+    /// dragon-drop), from which they can be dragged into other apps.
+    pub fn drag_out(&mut self) {
+        let targets = self.panes[self.active].targets();
+        if targets.is_empty() {
+            return self.set_status("Nothing to drag here", true);
+        }
+        // Not plain "dragon": on KDE that's the Dragon Player video player.
+        let Some(helper) = ["ripdrag", "dragon-drop", "xdragon"].into_iter().find(|c| find_in_path(c)) else {
+            return self.set_status("Dragging to other apps needs ripdrag or dragon-drop installed", true);
+        };
+        let mut paths = Vec::new();
+        for t in &targets {
+            match self.materialize(t) {
+                Some(p) => paths.push(p),
+                None => return,
+            }
+        }
+        // Both helpers take these: close after one drag, and (for several files)
+        // drag them all at once instead of one by one.
+        let mut cmd = Process::new(helper);
+        cmd.arg("--and-exit");
+        if paths.len() > 1 {
+            cmd.arg("--all-compact");
+        }
+        match cmd.args(&paths).spawn_reaped() {
+            Ok(()) => self.set_status(format!("Drag {} from the small window that opened", describe(&targets)), false),
+            Err(e) => self.set_status(format!("Couldn't start {helper}: {e}"), true),
+        }
     }
 
     pub fn ask_rename(&mut self) {
@@ -497,8 +552,7 @@ impl App {
                 .arg(format!("{} \"$1\"", self.settings.editor))
                 .arg("sh")
                 .arg(path)
-                .spawn()
-                .map(|_| ())
+                .spawn_reaped()
                 .map_err(|e| e.to_string())
         };
         if let Err(e) = res {
@@ -539,14 +593,14 @@ impl App {
             std::env::var("TERMINAL").ok().filter(|t| !t.is_empty())
         };
         let res = match configured {
-            Some(t) => Process::new("sh").arg("-c").arg(t).current_dir(&dir).spawn(),
+            Some(t) => Process::new("sh").arg("-c").arg(t).current_dir(&dir).spawn_reaped(),
             None => {
                 let candidates = [
                     "x-terminal-emulator", "kgx", "gnome-terminal", "konsole", "xfce4-terminal", "kitty",
                     "alacritty", "foot", "wezterm", "tilix", "xterm",
                 ];
                 match candidates.iter().find(|c| find_in_path(c)) {
-                    Some(t) => Process::new(t).current_dir(&dir).spawn(),
+                    Some(t) => Process::new(t).current_dir(&dir).spawn_reaped(),
                     None => return self.set_status("No terminal found; set \"terminal\" in the settings file", true),
                 }
             }
@@ -718,7 +772,7 @@ impl App {
             .env("DUOPANE_DIR", &dir)
             .env("DUOPANE_OTHER", &other)
             .env("DUOPANE_SELECTED", selected.join("\n"))
-            .spawn();
+            .spawn_reaped();
         match res {
             Ok(_) => self.set_status(format!("Ran “{}”", c.title), false),
             Err(e) => self.set_status(format!("“{}” failed: {e}", c.title), true),
@@ -768,7 +822,7 @@ impl App {
                 if let Err(e) = std::fs::create_dir_all(&dest) {
                     return self.set_status(format!("Couldn't create {text}: {e}"), true);
                 }
-                self.start_job(JobSpec::Extract { archive, items, base, dest });
+                self.start_job(JobSpec::Extract { archive, items, base, dest, policy: ConflictPolicy::Ask });
             }
             InputPurpose::Mask { select } => self.apply_mask(select, &text),
         }
@@ -782,7 +836,11 @@ impl App {
         if to == from {
             return;
         }
-        let only_case_changed = from.file_name().map(|n| n.to_string_lossy().to_lowercase()) == Some(text.to_lowercase());
+        // On a drive that ignores case, "Readme" -> "README" finds the file itself at
+        // the new name: that's fine. On Linux it is usually a different file, which
+        // the rename would silently replace.
+        let only_case_changed = from.file_name().map(|n| n.to_string_lossy().to_lowercase()) == Some(text.to_lowercase())
+            && crate::fs_ops::same_entry(from, &to);
         if to.symlink_metadata().is_ok() && !only_case_changed {
             return self.set_status(format!("“{text}” already exists"), true);
         }
@@ -833,23 +891,25 @@ impl App {
         if items.is_empty() {
             return self.set_status("Nothing to do: it's already there", false);
         }
-        let existing: Vec<&PathBuf> = items.iter().map(|(_, d)| d).filter(|d| d.symlink_metadata().is_ok()).collect();
-        if existing.is_empty() {
-            return self.start_job(JobSpec::Transfer { mv, items, policy: ConflictPolicy::Overwrite });
-        }
-        let message = if existing.len() == 1 {
-            let name = existing[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            format!("“{name}” already exists there. Replace it?")
-        } else {
-            format!("{} items already exist there. Replace them?", existing.len())
-        };
-        let replace = JobSpec::Transfer { mv, items: items.clone(), policy: ConflictPolicy::Overwrite };
-        let skip = JobSpec::Transfer { mv, items, policy: ConflictPolicy::Skip };
-        self.modal = Some(Modal::Confirm {
-            title: "Already exists".into(),
-            message,
-            buttons: vec![("Replace".into(), Some(replace)), ("Skip those".into(), Some(skip)), ("Cancel".into(), None)],
+        // Anything already there is asked about file by file while the job runs.
+        self.start_job(JobSpec::Transfer { mv, items, policy: ConflictPolicy::Ask });
+    }
+}
+
+/// Starts a program that runs on its own (terminal, editor, custom command).
+pub(crate) trait SpawnReaped {
+    /// Like `spawn`, but waits for the program on a small thread, so it doesn't
+    /// linger as a zombie process after it exits.
+    fn spawn_reaped(&mut self) -> std::io::Result<()>;
+}
+
+impl SpawnReaped for Process {
+    fn spawn_reaped(&mut self) -> std::io::Result<()> {
+        let mut child = self.spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
         });
+        Ok(())
     }
 }
 

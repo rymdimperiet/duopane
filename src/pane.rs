@@ -6,7 +6,12 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant, SystemTime};
+
+/// How long a folder may take to read before the pane stops waiting for it and
+/// shows "Loading…" (the window keeps responding while it finishes).
+const LOAD_WAIT: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub enum SortKey {
@@ -52,7 +57,7 @@ impl Entry {
 pub struct ArchiveState {
     /// The archive file on disk.
     pub file: PathBuf,
-    index: std::sync::Arc<crate::archive::Index>,
+    index: Arc<crate::archive::Index>,
     mtime: Option<SystemTime>,
 }
 
@@ -79,6 +84,35 @@ pub struct Pane {
     pub view_height: f32,
     /// `Some(text)` while the path bar is being edited.
     pub editing_path: Option<String>,
+    /// A folder still being read on another thread.
+    loading: Option<Loading>,
+    /// Put the cursor on this name once the folder being read arrives.
+    want_cursor: Option<String>,
+    /// How long to wait for a read before going on in the background ([`LOAD_WAIT`]).
+    load_wait: Duration,
+}
+
+/// A folder (or a folder inside an archive) as read from disk, on any thread.
+enum Fetched {
+    Dir { all: Vec<Entry>, mtime: Option<SystemTime> },
+    Archive { all: Vec<Entry>, state: ArchiveState },
+}
+
+/// What to do once a folder has been read.
+enum After {
+    Navigate { old: PathBuf },
+    Back { old: PathBuf },
+    Forward { old: PathBuf },
+    /// Re-reading the current folder; `gone` is set when it disappeared and a
+    /// parent is being tried instead.
+    Reload { gone: Option<PathBuf> },
+}
+
+struct Loading {
+    path: PathBuf,
+    rx: mpsc::Receiver<Result<Fetched, String>>,
+    then: After,
+    since: Instant,
 }
 
 impl Pane {
@@ -102,6 +136,9 @@ impl Pane {
             scroll_offset: 0.0,
             view_height: 400.0,
             editing_path: None,
+            loading: None,
+            want_cursor: None,
+            load_wait: LOAD_WAIT,
         };
         let fallbacks = [
             path.to_path_buf(),
@@ -109,60 +146,132 @@ impl Pane {
             PathBuf::from("/"),
         ];
         for candidate in fallbacks {
-            if p.load(&candidate).is_ok() {
+            if p.start_load(&candidate, After::Reload { gone: None }).is_ok() {
                 break;
             }
         }
         p
     }
 
-    fn load(&mut self, path: &Path) -> Result<(), String> {
-        if !path.is_dir() {
-            if let Some(file) = archive_file_in(path) {
-                return self.load_archive(path, &file);
+    /// Reads `path` on another thread. If that's quick, the pane shows it before
+    /// returning; otherwise it keeps showing the current folder until
+    /// [`Pane::poll_loading`] picks the result up. Errors that arrive straight away
+    /// are returned; later ones come out of `poll_loading`.
+    fn start_load(&mut self, path: &Path, then: After) -> Result<(), String> {
+        self.loading = None; // a newer request replaces an unfinished one
+        let cache = self.archive.as_ref().map(|a| (a.file.clone(), a.mtime, a.index.clone()));
+        let (tx, rx) = mpsc::channel();
+        let p = path.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(fetch(&p, cache));
+        });
+        match rx.recv_timeout(self.load_wait) {
+            Ok(r) => self.complete(path, then, r).map(|_| ()),
+            Err(_) => {
+                self.loading = Some(Loading { path: path.to_path_buf(), rx, then, since: Instant::now() });
+                Ok(())
             }
         }
-        let all = read_entries(path).map_err(|e| format!("Can't open {}: {}", path.display(), e))?;
-        self.path = path.to_path_buf();
-        self.all = all;
-        self.archive = None;
-        self.dir_mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
-        self.error = None;
-        self.apply_view();
-        Ok(())
     }
 
-    /// Shows a folder inside an archive, like a normal folder.
-    fn load_archive(&mut self, path: &Path, file: &Path) -> Result<(), String> {
-        let inner = path.strip_prefix(file).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-        let inner = inner.trim_matches('/').to_string();
-        let mtime = fs::metadata(file).and_then(|m| m.modified()).ok();
-        let index = match &self.archive {
-            Some(a) if a.file == file && a.mtime == mtime => a.index.clone(),
-            _ => std::sync::Arc::new(
-                crate::archive::build_index(file).map_err(|e| format!("Can't open {}: {e}", file.display()))?,
-            ),
+    /// Picks up a folder that finished reading in the background. Returns
+    /// `Some(Ok(true))` when the pane moved to another folder, `Some(Ok(false))`
+    /// when it re-read the same one, `Some(Err)` when reading failed.
+    pub fn poll_loading(&mut self) -> Option<Result<bool, String>> {
+        let r = match self.loading.as_ref()?.rx.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => Err("Reading the folder failed".to_string()),
         };
-        if !index.is_dir(&inner) {
-            return Err(format!("No folder “{inner}” in {}", file.display()));
+        let l = self.loading.take()?;
+        let r = self.complete(&l.path, l.then, r);
+        // A follow-up read (an older history entry, a parent folder) may now be under way.
+        if self.loading.is_some() && r.is_ok() {
+            return None;
         }
-        self.all = index
-            .children(&inner)
-            .map(|e| Entry {
-                name: e.path.rsplit('/').next().unwrap_or(&e.path).to_string(),
-                path: file.join(&e.path),
-                is_dir: e.is_dir,
-                is_symlink: false,
-                size: e.size,
-                modified: e.modified,
-            })
-            .collect();
+        Some(r)
+    }
+
+    /// The folder being read in the background, once it has taken long enough to mention.
+    pub fn loading_path(&self) -> Option<&Path> {
+        self.loading.as_ref().filter(|l| l.since.elapsed() >= self.load_wait).map(|l| l.path.as_path())
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// Shows a finished read, or handles its failure. Returns whether the pane moved.
+    fn complete(&mut self, path: &Path, then: After, result: Result<Fetched, String>) -> Result<bool, String> {
+        let fetched = match result {
+            Ok(f) => f,
+            Err(e) => {
+                return match then {
+                    After::Navigate { .. } => Err(e),
+                    // Skip history entries that can't be opened any more.
+                    After::Back { .. } => self.go_back().map(|_| true),
+                    After::Forward { .. } => self.go_forward().map(|_| true),
+                    // The folder disappeared: move to the nearest one that still exists.
+                    After::Reload { gone } => match path.parent() {
+                        Some(parent) => {
+                            let gone = gone.unwrap_or_else(|| path.to_path_buf());
+                            self.start_load(parent, After::Reload { gone: Some(gone) }).map(|_| true)
+                        }
+                        None => {
+                            self.error = Some(e.clone());
+                            Err(e)
+                        }
+                    },
+                };
+            }
+        };
         self.path = path.to_path_buf();
-        self.archive = Some(ArchiveState { file: file.to_path_buf(), index, mtime });
-        self.dir_mtime = mtime;
+        match fetched {
+            Fetched::Dir { all, mtime } => {
+                self.all = all;
+                self.archive = None;
+                self.dir_mtime = mtime;
+            }
+            Fetched::Archive { all, state } => {
+                self.all = all;
+                self.dir_mtime = state.mtime;
+                self.archive = Some(state);
+            }
+        }
         self.error = None;
         self.apply_view();
-        Ok(())
+        let moved = match then {
+            After::Navigate { old } => {
+                self.after_dir_change(&old);
+                if !old.as_os_str().is_empty() {
+                    self.back.push(old);
+                    if self.back.len() > 200 {
+                        self.back.remove(0);
+                    }
+                }
+                self.forward.clear();
+                true
+            }
+            After::Back { old } => {
+                self.after_dir_change(&old);
+                self.forward.push(old);
+                true
+            }
+            After::Forward { old } => {
+                self.after_dir_change(&old);
+                self.back.push(old);
+                true
+            }
+            After::Reload { gone: Some(gone) } => {
+                self.after_dir_change(&gone);
+                true
+            }
+            After::Reload { gone: None } => false,
+        };
+        if let Some(name) = self.want_cursor.take() {
+            self.set_cursor_to_name(&name);
+        }
+        Ok(moved)
     }
 
     /// The real folder on disk: the archive's folder while browsing inside an archive.
@@ -265,20 +374,12 @@ impl Pane {
     pub fn navigate(&mut self, path: &Path) -> Result<(), String> {
         let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         if path == self.path {
+            self.loading = None; // e.g. clicked back to here while another folder was loading
             self.reload();
             return Ok(());
         }
         let old = self.path.clone();
-        self.load(&path)?;
-        self.after_dir_change(&old);
-        if !old.as_os_str().is_empty() {
-            self.back.push(old);
-            if self.back.len() > 200 {
-                self.back.remove(0);
-            }
-        }
-        self.forward.clear();
-        Ok(())
+        self.start_load(&path, After::Navigate { old })
     }
 
     fn after_dir_change(&mut self, old: &Path) {
@@ -309,41 +410,25 @@ impl Pane {
     }
 
     pub fn go_back(&mut self) -> Result<(), String> {
-        while let Some(prev) = self.back.pop() {
-            let old = self.path.clone();
-            if self.load(&prev).is_ok() {
-                self.after_dir_change(&old);
-                self.forward.push(old);
-                return Ok(());
-            }
-        }
-        Err("No earlier folder".into())
+        let Some(prev) = self.back.pop() else { return Err("No earlier folder".into()) };
+        let old = self.path.clone();
+        self.start_load(&prev, After::Back { old })
     }
 
     pub fn go_forward(&mut self) -> Result<(), String> {
-        while let Some(next) = self.forward.pop() {
-            let old = self.path.clone();
-            if self.load(&next).is_ok() {
-                self.after_dir_change(&old);
-                self.back.push(old);
-                return Ok(());
-            }
-        }
-        Err("No later folder".into())
+        let Some(next) = self.forward.pop() else { return Err("No later folder".into()) };
+        let old = self.path.clone();
+        self.start_load(&next, After::Forward { old })
     }
 
     /// Re-reads the folder. If it no longer exists, moves to the nearest folder that does.
+    /// Does nothing while another folder is being read: that read brings fresh contents.
     pub fn reload(&mut self) {
+        if self.loading.is_some() {
+            return;
+        }
         let path = self.path.clone();
-        if let Err(e) = self.load(&path) {
-            let mut p = path.clone();
-            while let Some(parent) = p.parent() {
-                p = parent.to_path_buf();
-                if self.load(&p).is_ok() {
-                    self.after_dir_change(&path);
-                    return;
-                }
-            }
+        if let Err(e) = self.start_load(&path, After::Reload { gone: None }) {
             self.error = Some(e);
         }
     }
@@ -379,6 +464,10 @@ impl Pane {
     }
 
     pub fn set_cursor_to_name(&mut self, name: &str) {
+        if self.loading.is_some() {
+            self.want_cursor = Some(name.to_string());
+            return;
+        }
         if let Some(i) = self.entries.iter().position(|e| e.name == name) {
             self.set_cursor(i);
         }
@@ -564,6 +653,47 @@ fn glob(p: &[char], s: &[char]) -> bool {
     pi == p.len()
 }
 
+/// An archive's index kept from the last read: (file, its modification time, index).
+type IndexCache = Option<(PathBuf, Option<SystemTime>, Arc<crate::archive::Index>)>;
+
+/// Reads a folder, or a folder inside an archive. Runs on a background thread.
+fn fetch(path: &Path, cache: IndexCache) -> Result<Fetched, String> {
+    if !path.is_dir() {
+        if let Some(file) = archive_file_in(path) {
+            return fetch_archive(path, &file, cache);
+        }
+    }
+    let all = read_entries(path).map_err(|e| format!("Can't open {}: {}", path.display(), e))?;
+    let mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
+    Ok(Fetched::Dir { all, mtime })
+}
+
+/// Lists a folder inside an archive, like a normal folder.
+fn fetch_archive(path: &Path, file: &Path, cache: IndexCache) -> Result<Fetched, String> {
+    let inner = path.strip_prefix(file).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+    let inner = inner.trim_matches('/').to_string();
+    let mtime = fs::metadata(file).and_then(|m| m.modified()).ok();
+    let index = match cache {
+        Some((f, m, index)) if f == file && m == mtime => index,
+        _ => Arc::new(crate::archive::build_index(file).map_err(|e| format!("Can't open {}: {e}", file.display()))?),
+    };
+    if !index.is_dir(&inner) {
+        return Err(format!("No folder “{inner}” in {}", file.display()));
+    }
+    let all = index
+        .children(&inner)
+        .map(|e| Entry {
+            name: e.path.rsplit('/').next().unwrap_or(&e.path).to_string(),
+            path: file.join(&e.path),
+            is_dir: e.is_dir,
+            is_symlink: false,
+            size: e.size,
+            modified: e.modified,
+        })
+        .collect();
+    Ok(Fetched::Archive { all, state: ArchiveState { file: file.to_path_buf(), index, mtime } })
+}
+
 /// If `path` is an archive file, or a folder inside one, returns the archive file.
 fn archive_file_in(path: &Path) -> Option<PathBuf> {
     let mut p = Some(path);
@@ -739,6 +869,58 @@ mod tests {
         assert!(p.archive.is_none());
         assert_eq!(p.cursor_entry().unwrap().name, "pics.zip");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Waits for a background read, returning what `poll_loading` reported.
+    fn settle(p: &mut Pane) -> Result<bool, String> {
+        let t = std::time::Instant::now();
+        loop {
+            if let Some(r) = p.poll_loading() {
+                return r;
+            }
+            assert!(t.elapsed() < Duration::from_secs(5), "folder never finished loading");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn slow_folders_load_in_the_background() {
+        let dir = std::env::temp_dir().join(format!("duopane-bg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a/inner")).unwrap();
+        fs::write(dir.join("a/x.txt"), b"x").unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let mut p = Pane::new(&dir, false, false, SortKey::Name, true);
+        p.load_wait = Duration::ZERO; // every read now finishes in the background
+
+        p.navigate(&dir.join("a")).unwrap();
+        assert!(p.is_loading());
+        assert_eq!(p.path, dir, "keeps showing the old folder meanwhile");
+        p.reload(); // ignored: mustn't cancel the navigation
+        p.set_cursor_to_name("x.txt"); // remembered until the folder arrives
+        assert_eq!(settle(&mut p), Ok(true));
+        assert_eq!(p.path, dir.join("a"));
+        assert_eq!(p.cursor_entry().unwrap().name, "x.txt");
+        assert_eq!(p.back, vec![dir.clone()]);
+
+        p.go_back().unwrap();
+        assert_eq!(settle(&mut p), Ok(true));
+        assert_eq!(p.path, dir);
+        assert_eq!(p.cursor_entry().unwrap().name, "a", "cursor on the folder we came from");
+        assert_eq!(p.forward, vec![dir.join("a")]);
+
+        // The folder being shown disappears: the pane moves to its parent.
+        p.navigate(&dir.join("a/inner")).unwrap();
+        settle(&mut p).unwrap();
+        fs::remove_dir_all(dir.join("a/inner")).unwrap();
+        p.reload();
+        assert_eq!(settle(&mut p), Ok(true));
+        assert_eq!(p.path, dir.join("a"));
+
+        assert!(p.navigate(&dir.join("missing")).is_ok());
+        assert!(settle(&mut p).is_err());
+        assert_eq!(p.path, dir.join("a"), "a failed read leaves the pane where it was");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

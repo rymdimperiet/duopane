@@ -1027,6 +1027,7 @@ dependencies = [
  "fontdb",
  "image",
  "open",
+ "raw-window-handle",
  "regex",
  "rodio",
  "serde",
@@ -1034,6 +1035,8 @@ dependencies = [
  "syntect",
  "tar",
  "trash",
+ "wayland-backend",
+ "wayland-client",
  "zip",
 ]
 

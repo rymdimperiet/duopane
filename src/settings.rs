@@ -61,10 +61,16 @@ pub struct Settings {
     pub ui_font: String,
     /// Monospaced font family (lister text and hex); empty = built-in.
     pub mono_font: String,
+    /// Font weights, 100 (thin) to 900 (black); 400 is regular, 700 bold.
+    pub ui_font_weight: u16,
+    pub mono_font_weight: u16,
     /// Lister: wrap long lines.
     pub lister_wrap: bool,
     /// Alternate the brightness of rows in the file lists.
     pub striped_rows: bool,
+    /// How different striped rows look, in percent of the text colour laid over
+    /// the background. None: the colour scheme's own (6 dark, 8 light).
+    pub stripe_percent: Option<f32>,
     /// Show the function-key bar (F2 Rename, F3 View, ...) at the bottom.
     pub show_key_bar: bool,
     /// Show a ".." row at the top of every folder.
@@ -88,6 +94,10 @@ pub struct Settings {
     pub lister_plugins: Vec<ListerPlugin>,
 }
 
+/// The range of the "Row contrast" slider, in percent.
+pub const STRIPE_MIN: f32 = 1.0;
+pub const STRIPE_MAX: f32 = 30.0;
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -103,8 +113,11 @@ impl Default for Settings {
             custom_colors: BTreeMap::new(),
             ui_font: String::new(),
             mono_font: String::new(),
+            ui_font_weight: 400,
+            mono_font_weight: 400,
             lister_wrap: false,
             striped_rows: true,
+            stripe_percent: None,
             show_key_bar: true,
             show_dotdot: true,
             volume: 0.8,
@@ -147,6 +160,9 @@ impl Settings {
             Ok(text) => match serde_json::from_str::<Settings>(&text) {
                 Ok(mut s) => {
                     s.font_size = s.font_size.clamp(9.0, 32.0);
+                    s.stripe_percent = s.stripe_percent.map(|p| p.clamp(STRIPE_MIN, STRIPE_MAX));
+                    s.ui_font_weight = s.ui_font_weight.clamp(100, 900);
+                    s.mono_font_weight = s.mono_font_weight.clamp(100, 900);
                     (s, None)
                 }
                 Err(e) => (Settings::default(), Some(format!("Settings file has an error ({e}); using defaults"))),

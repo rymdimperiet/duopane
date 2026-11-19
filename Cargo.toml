@@ -7,7 +7,7 @@ license = "MIT"
 readme = "README.md"
 keywords = ["file-manager", "dual-pane", "commander", "egui"]
 categories = ["filesystem", "gui"]
-rust-version = "1.82"
+rust-version = "1.87"
 default-run = "duopane"
 
 [dependencies]
@@ -33,6 +33,13 @@ egui_commonmark = { version = "0.20", default-features = false, features = ["pul
 egui_extras = { version = "0.31", default-features = false, features = ["file", "image"] }
 # Appearance: list and load the fonts installed on the system
 fontdb = "0.23"
+
+# Dragging files out of the window into other apps on Wayland (see src/native_drag.rs).
+# All three already come with eframe/winit; these lines only let Duopane use them.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+raw-window-handle = "0.6"
 
 [profile.release]
 opt-level = 3

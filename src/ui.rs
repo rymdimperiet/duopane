@@ -7,6 +7,12 @@ use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Sense, Stroke
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Files being dragged with the mouse from one of the panes.
+pub(crate) struct DragPayload {
+    pub from: usize,
+    pub paths: Vec<PathBuf>,
+}
+
 impl App {
     pub(crate) fn bottom_bar(&mut self, ctx: &egui::Context) {
         if self.settings.show_key_bar {
@@ -183,6 +189,7 @@ impl App {
                     pane_ui(&mut cols[1], &mut right[0], 1, active == 1, b1, actions);
                 });
             });
+        drag_label(ctx);
     }
 }
 
@@ -294,6 +301,10 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
             format!("{} · {}", plural(dirs, "folder"), plural(files, "file"))
         };
         let hidden = if pane.show_hidden { "" } else { "   (hidden files not shown: Ctrl+.)" };
+        let (text, hidden) = match pane.loading_path() {
+            Some(p) => (format!("Loading {}…", crate::app::tilde(p)), ""),
+            None => (text, hidden),
+        };
         ui.painter().text(
             pos2(foot_rect.left() + 10.0, foot_rect.center().y),
             Align2::LEFT_CENTER,
@@ -305,6 +316,40 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
     if resp.response.contains_pointer() && ui.input(|i| i.pointer.any_pressed()) {
         actions.push(Action::Activate(idx));
     }
+    // Files dragged over from the other pane (or from another app) go into this
+    // pane's folder. Folder rows take drops themselves (see `row_ui`).
+    let from_other = |p: &DragPayload| p.from != idx;
+    let incoming = resp.response.dnd_hover_payload::<DragPayload>().is_some_and(|p| from_other(&p))
+        || (resp.response.contains_pointer() && ui.input(|i| !i.raw.hovered_files.is_empty()));
+    if incoming && pane.archive.is_none() {
+        ui.painter().rect_stroke(resp.response.rect, 4.0, Stroke::new(2.0, theme::c().accent), egui::StrokeKind::Inside);
+    }
+    if let Some(p) = resp.response.dnd_release_payload::<DragPayload>().filter(|p| from_other(p)) {
+        let mv = ui.input(|i| i.modifiers.shift);
+        actions.push(Action::Drop { from: Some(p.from), to: idx, paths: p.paths.clone(), dest: pane.path.clone(), mv });
+    }
+}
+
+/// While files are dragged, a small label by the pointer says what's dragged, and
+/// the pointer says whether a drop copies (with a plus) or moves (Shift held),
+/// like Double Commander. The label never changes size, so it doesn't jump.
+/// (egui itself cancels the drag on Escape or a release over nothing. During a
+/// drag run by the desktop, the desktop draws the pointer; see `native_drag.rs`.)
+fn drag_label(ctx: &egui::Context) {
+    let Some(p) = egui::DragAndDrop::payload::<DragPayload>(ctx) else { return };
+    let Some(pos) = ctx.pointer_interact_pos() else { return };
+    let mv = ctx.input(|i| i.modifiers.shift);
+    ctx.set_cursor_icon(if mv { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Copy });
+    let what = crate::app::describe(&p.paths);
+    egui::Area::new(egui::Id::new("drag_label"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pos + vec2(16.0, 12.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).fill(theme::c().header).show(ui, |ui| {
+                ui.label(egui::RichText::new(what).color(theme::c().text));
+            });
+        });
 }
 
 /// The clickable folder path at the top of a pane (Ctrl+L to type one).
@@ -378,7 +423,7 @@ fn row_ui(
     row_h: f32,
     actions: &mut Vec<Action>,
 ) {
-    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click_and_drag());
     let Some(e) = pane.entries.get(i) else { return };
     let selected = pane.selected.contains(&e.name);
     let painter = ui.painter_at(rect);
@@ -420,6 +465,24 @@ fn row_ui(
         painter.text(pos2(c_date.right() - 4.0, y), Align2::RIGHT_CENTER, s, small.clone(), theme::c().dim);
     }
 
+    // Dragging a selected row takes the whole selection; any other row goes alone.
+    if r.drag_started() {
+        let paths = if selected { pane.targets() } else if e.is_up() { Vec::new() } else { vec![e.path.clone()] };
+        if !paths.is_empty() {
+            egui::DragAndDrop::set_payload(ui.ctx(), DragPayload { from: idx, paths });
+        }
+    }
+    // A folder row takes a drop into that folder ("..": into the parent).
+    if e.is_dir {
+        let into_itself = |p: &DragPayload| p.paths.contains(&e.path);
+        if r.dnd_hover_payload::<DragPayload>().is_some_and(|p| !into_itself(&p)) {
+            painter.rect_stroke(bg, 3.0, Stroke::new(2.0, theme::c().accent), egui::StrokeKind::Inside);
+        }
+        if let Some(p) = r.dnd_release_payload::<DragPayload>().filter(|p| !into_itself(p)) {
+            let mv = ui.input(|i| i.modifiers.shift);
+            actions.push(Action::Drop { from: Some(p.from), to: idx, paths: p.paths.clone(), dest: e.path.clone(), mv });
+        }
+    }
     if r.clicked() {
         actions.push(Action::Activate(idx));
         let m = ui.input(|inp| inp.modifiers);
@@ -447,6 +510,7 @@ fn row_ui(
             ("copy", "Copy to other pane…"),
             ("move", "Move to other pane…"),
             ("copy_path", "Copy path"),
+            ("drag_out", "Drag to another app…"),
             ("pack", "Pack (compress)…"),
             ("unpack", "Unpack…"),
             ("folder_size", "Calculate size"),
@@ -583,4 +647,156 @@ fn short_label(id: &str) -> Option<&'static str> {
         "sort_size" => "Sort: size",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pane::SortKey;
+    use egui::{Event, PointerButton, Pos2, RawInput, Rect};
+
+    /// Draws both panes for one frame (no window needed) with the given input events.
+    fn frame(ctx: &egui::Context, panes: &mut [Pane; 2], actions: &mut Vec<Action>, events: Vec<Event>) {
+        frame_with(ctx, panes, actions, events, egui::Modifiers::NONE);
+    }
+
+    fn frame_with(ctx: &egui::Context, panes: &mut [Pane; 2], actions: &mut Vec<Action>, events: Vec<Event>, modifiers: egui::Modifiers) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))),
+            events,
+            modifiers,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let (l, r) = panes.split_at_mut(1);
+                ui.columns(2, |cols| {
+                    pane_ui(&mut cols[0], &mut l[0], 0, true, false, actions);
+                    pane_ui(&mut cols[1], &mut r[0], 1, false, false, actions);
+                });
+            });
+            drag_label(ctx);
+        });
+    }
+
+    /// Presses at `from`, moves in steps to `to`, releases there (Shift held when `shift`).
+    fn drag(ctx: &egui::Context, panes: &mut [Pane; 2], actions: &mut Vec<Action>, from: Pos2, to: Pos2, shift: bool) {
+        let modifiers = egui::Modifiers { shift, ..Default::default() };
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers };
+        frame_with(ctx, panes, actions, vec![Event::PointerMoved(from), button(from, true)], modifiers);
+        for k in 1..=5 {
+            let p = from + (to - from) * (k as f32 / 5.0);
+            frame_with(ctx, panes, actions, vec![Event::PointerMoved(p)], modifiers);
+        }
+        frame_with(ctx, panes, actions, vec![button(to, false)], modifiers);
+        frame(ctx, panes, actions, vec![]);
+    }
+
+    #[test]
+    fn drag_rows_between_panes_and_onto_folders() {
+        let base = std::env::temp_dir().join(format!("duopane-dnd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("left/sub")).unwrap();
+        std::fs::write(base.join("left/b.txt"), b"b").unwrap();
+        std::fs::create_dir_all(base.join("right")).unwrap();
+        let base = base.canonicalize().unwrap();
+        let mut panes = [
+            Pane::new(&base.join("left"), false, false, SortKey::Name, true),
+            Pane::new(&base.join("right"), false, false, SortKey::Name, true),
+        ];
+        let ctx = egui::Context::default();
+        let mut actions = Vec::new();
+        frame(&ctx, &mut panes, &mut actions, vec![]);
+
+        // Rows: "sub" then "b.txt", below the path bar and the column headers.
+        let row_h = theme::row_height(ctx.style().text_styles[&egui::TextStyle::Body].size);
+        let row = |i: usize| pos2(150.0, 8.0 + 30.0 + row_h + (i as f32 + 0.5) * row_h);
+        // Make sure the rows are where this test thinks: clicking row 1 puts the cursor there.
+        let click = |pressed| Event::PointerButton { pos: row(1), button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(&ctx, &mut panes, &mut actions, vec![Event::PointerMoved(row(1)), click(true)]);
+        frame(&ctx, &mut panes, &mut actions, vec![click(false)]);
+        assert_eq!(panes[0].cursor_entry().unwrap().name, "b.txt");
+        actions.clear();
+
+        // b.txt onto the right pane: copy there.
+        drag(&ctx, &mut panes, &mut actions, row(1), pos2(750.0, 400.0), false);
+        let drops: Vec<_> = actions.iter().filter_map(|a| match a { Action::Drop { from, to, paths, dest, mv } => Some((*from, *to, paths.clone(), dest.clone(), *mv)), _ => None }).collect();
+        assert_eq!(drops, vec![(Some(0), 1, vec![base.join("left/b.txt")], base.join("right"), false)]);
+        actions.clear();
+
+        // b.txt onto the "sub" folder row with Shift: move into it.
+        drag(&ctx, &mut panes, &mut actions, row(1), row(0), true);
+        let drops: Vec<_> = actions.iter().filter_map(|a| match a { Action::Drop { to, dest, mv, .. } => Some((*to, dest.clone(), *mv)), _ => None }).collect();
+        assert_eq!(drops, vec![(0, base.join("left/sub"), true)]);
+        actions.clear();
+
+        // Released over its own pane's empty area: nothing happens, and no drag is left hanging.
+        drag(&ctx, &mut panes, &mut actions, row(1), pos2(150.0, 450.0), false);
+        assert!(!actions.iter().any(|a| matches!(a, Action::Drop { .. })));
+        assert!(!egui::DragAndDrop::has_any_payload(&ctx));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Once a drag is in the desktop's hands, egui only sees what
+    /// `drag_events_to_input` makes of the desktop's events.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn drags_run_by_the_desktop() {
+        use crate::native_drag::DragEvent;
+        let base = std::env::temp_dir().join(format!("duopane-dnd-native-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("left")).unwrap();
+        std::fs::write(base.join("left/b.txt"), b"b").unwrap();
+        std::fs::create_dir_all(base.join("right")).unwrap();
+        let base = base.canonicalize().unwrap();
+        let mut panes = [
+            Pane::new(&base.join("left"), false, false, SortKey::Name, true),
+            Pane::new(&base.join("right"), false, false, SortKey::Name, true),
+        ];
+        let ctx = egui::Context::default();
+        let mut actions = Vec::new();
+        frame(&ctx, &mut panes, &mut actions, vec![]);
+        let row_h = theme::row_height(ctx.style().text_styles[&egui::TextStyle::Body].size);
+        let row0 = pos2(150.0, 8.0 + 30.0 + row_h * 1.5);
+        let press = |pressed| Event::PointerButton { pos: row0, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        // The desktop's events, as egui input for one frame.
+        let desktop = |ctx: &egui::Context, panes: &mut [Pane; 2], actions: &mut Vec<Action>, events: Vec<DragEvent>, dragging: &mut bool| {
+            let mut raw = RawInput::default();
+            crate::app::drag_events_to_input(events, &mut raw, 1.0, dragging, &mut false);
+            frame(ctx, panes, actions, raw.events);
+        };
+
+        for (end, expect_drop) in [(DragEvent::DropOurs { x: 750.0, y: 300.0 }, true), (DragEvent::Ended, false)] {
+            actions.clear();
+            // Start dragging b.txt in egui; the desktop then takes over (the window
+            // loses the pointer), the drag comes back over the right pane, and ends.
+            frame(&ctx, &mut panes, &mut actions, vec![Event::PointerMoved(row0), press(true)]);
+            frame(&ctx, &mut panes, &mut actions, vec![Event::PointerMoved(row0 + vec2(30.0, 0.0))]);
+            assert!(egui::DragAndDrop::has_any_payload(&ctx));
+            let mut dragging = true;
+            desktop(&ctx, &mut panes, &mut actions, vec![DragEvent::Leave], &mut dragging);
+            desktop(&ctx, &mut panes, &mut actions, vec![DragEvent::Motion { x: 700.0, y: 300.0, ours: true }], &mut dragging);
+            assert!(egui::DragAndDrop::has_any_payload(&ctx), "the drag survives the desktop taking over");
+            if !expect_drop {
+                // Dropped in an app on top of ours: the desktop says Leave, then Ended.
+                desktop(&ctx, &mut panes, &mut actions, vec![DragEvent::Leave], &mut dragging);
+            }
+            desktop(&ctx, &mut panes, &mut actions, vec![end], &mut dragging);
+            frame(&ctx, &mut panes, &mut actions, vec![]);
+            let drops: Vec<_> = actions.iter().filter_map(|a| match a { Action::Drop { to, dest, .. } => Some((*to, dest.clone())), _ => None }).collect();
+            if expect_drop {
+                assert_eq!(drops, vec![(1, base.join("right"))]);
+            } else {
+                assert!(drops.is_empty(), "{drops:?}");
+            }
+            assert!(!dragging);
+            assert!(!egui::DragAndDrop::has_any_payload(&ctx), "nothing left hanging");
+            // And the next click is an ordinary click again.
+            actions.clear();
+            frame(&ctx, &mut panes, &mut actions, vec![Event::PointerMoved(row0), press(true)]);
+            frame(&ctx, &mut panes, &mut actions, vec![press(false)]);
+            assert!(actions.iter().any(|a| matches!(a, Action::Activate(0))));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

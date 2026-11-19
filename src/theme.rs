@@ -72,6 +72,11 @@ pub fn c() -> Theme {
     CURRENT.with(|t| t.get())
 }
 
+/// How strong the row stripes are, in percent (the setting, or the scheme's default).
+pub fn stripe_percent(s: &Settings, light: bool) -> f32 {
+    s.stripe_percent.unwrap_or(if light { 8.0 } else { 6.0 })
+}
+
 /// Height of one file-list row for a given text size.
 pub fn row_height(font_size: f32) -> f32 {
     (font_size * 1.6).round().max(22.0)
@@ -113,7 +118,7 @@ pub fn apply(ctx: &egui::Context, s: &Settings) {
         s.custom_colors
             .get("stripe")
             .and_then(|v| parse_hex(v))
-            .unwrap_or_else(|| th.text.gamma_multiply(if th.light { 0.08 } else { 0.06 }))
+            .unwrap_or_else(|| th.text.gamma_multiply(stripe_percent(s, th.light) / 100.0))
     });
     CURRENT.with(|x| x.set(th));
 
@@ -135,7 +140,7 @@ pub fn apply(ctx: &egui::Context, s: &Settings) {
     v.widgets.active.weak_bg_fill = th.cursor;
     ctx.set_visuals(v);
 
-    apply_fonts(ctx, &s.ui_font, &s.mono_font);
+    apply_fonts(ctx, (&s.ui_font, s.ui_font_weight), (&s.mono_font, s.mono_font_weight));
 
     let size = s.font_size;
     ctx.style_mut(|st| {
@@ -147,22 +152,27 @@ pub fn apply(ctx: &egui::Context, s: &Settings) {
     });
 }
 
+/// A font family and weight, e.g. ("Inter", 500).
+type FontChoice<'a> = (&'a str, u16);
+/// The interface and monospace fonts last loaded (so unchanged fonts aren't reloaded).
+type LoadedFonts = ((String, u16), (String, u16));
+
 thread_local! {
-    static LOADED_FONTS: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+    static LOADED_FONTS: std::cell::RefCell<Option<LoadedFonts>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Puts the chosen system fonts first; egui's built-in fonts stay as fallback (icons, emoji).
-fn apply_fonts(ctx: &egui::Context, ui_font: &str, mono_font: &str) {
-    let key = (ui_font.to_string(), mono_font.to_string());
+fn apply_fonts(ctx: &egui::Context, ui_font: FontChoice, mono_font: FontChoice) {
+    let key = ((ui_font.0.to_string(), ui_font.1), (mono_font.0.to_string(), mono_font.1));
     if LOADED_FONTS.with(|l| l.borrow().as_ref() == Some(&key)) {
         return;
     }
     let mut fonts = egui::FontDefinitions::default();
-    for (name, family, slot) in [(ui_font, FontFamily::Proportional, "user-ui"), (mono_font, FontFamily::Monospace, "user-mono")] {
+    for ((name, weight), family, slot) in [(ui_font, FontFamily::Proportional, "user-ui"), (mono_font, FontFamily::Monospace, "user-mono")] {
         if name.is_empty() {
             continue;
         }
-        if let Some((bytes, index)) = load_family(name) {
+        if let Some((bytes, index)) = load_family(name, weight) {
             let mut fd = egui::FontData::from_owned(bytes);
             fd.index = index;
             fonts.font_data.insert(slot.into(), Arc::new(fd));
@@ -203,9 +213,39 @@ pub fn font_families(mono_only: bool) -> &'static [String] {
     }
 }
 
-fn load_family(name: &str) -> Option<(Vec<u8>, u32)> {
+/// The weights (100–900) installed for a font family, upright normal-width faces
+/// only, lightest first. A variable font shows as one weight: egui can't pick others from it.
+pub fn font_weights(name: &str) -> Vec<u16> {
+    let mut v: Vec<u16> = db()
+        .faces()
+        .filter(|f| f.style == fontdb::Style::Normal && f.stretch == fontdb::Stretch::Normal)
+        .filter(|f| f.families.iter().any(|(n, _)| n == name))
+        .map(|f| f.weight.0)
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// "Bold" for 700, and so on.
+pub fn weight_name(w: u16) -> &'static str {
+    match w {
+        0..=149 => "Thin",
+        150..=249 => "Extra Light",
+        250..=349 => "Light",
+        350..=449 => "Regular",
+        450..=549 => "Medium",
+        550..=649 => "Semi Bold",
+        650..=749 => "Bold",
+        750..=849 => "Extra Bold",
+        _ => "Black",
+    }
+}
+
+/// The font file for a family, as close to `weight` as it comes (upright).
+fn load_family(name: &str, weight: u16) -> Option<(Vec<u8>, u32)> {
     let families = [fontdb::Family::Name(name)];
-    let q = fontdb::Query { families: &families, ..Default::default() };
+    let q = fontdb::Query { families: &families, weight: fontdb::Weight(weight), ..Default::default() };
     let id = db().query(&q)?;
     db().with_face_data(id, |data, index| (data.to_vec(), index))
 }

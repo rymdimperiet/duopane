@@ -2,7 +2,7 @@
 //! searchable list used by "Go to" and the command palette.
 
 use crate::app::{expand_tilde, subdirs, tilde, Action, App, CmdRef, Modal};
-use crate::fs_ops::JobSpec;
+use crate::fs_ops::{ConflictPolicy, FileInfo, JobSpec, Reply};
 use crate::fuzzy;
 use crate::theme;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Modifiers, Sense};
@@ -447,12 +447,19 @@ impl App {
                         });
                         ui.end_row();
 
+                        let s = &mut self.settings;
                         ui.label("Interface font");
-                        changed |= font_picker(ui, "ui_font", &mut self.settings.ui_font, ui_filter, false);
+                        ui.horizontal(|ui| {
+                            changed |= font_picker(ui, "ui_font", &mut s.ui_font, ui_filter, false);
+                            changed |= weight_picker(ui, "ui_weight", &s.ui_font, &mut s.ui_font_weight);
+                        });
                         ui.end_row();
 
                         ui.label("Monospace font");
-                        changed |= font_picker(ui, "mono_font", &mut self.settings.mono_font, mono_filter, true);
+                        ui.horizontal(|ui| {
+                            changed |= font_picker(ui, "mono_font", &mut s.mono_font, mono_filter, true);
+                            changed |= weight_picker(ui, "mono_weight", &s.mono_font, &mut s.mono_font_weight);
+                        });
                         ui.end_row();
 
                         ui.label("Text size");
@@ -464,6 +471,25 @@ impl App {
 
                         ui.label("Rows");
                         changed |= ui.checkbox(&mut self.settings.striped_rows, "Alternate row brightness").changed();
+                        ui.end_row();
+
+                        ui.label("Row contrast");
+                        ui.add_enabled_ui(self.settings.striped_rows, |ui| {
+                            ui.horizontal(|ui| {
+                                let mut pct = theme::stripe_percent(&self.settings, theme::c().light);
+                                let slider = egui::Slider::new(&mut pct, crate::settings::STRIPE_MIN..=crate::settings::STRIPE_MAX)
+                                    .step_by(1.0)
+                                    .suffix(" %");
+                                if ui.add(slider).changed() {
+                                    self.settings.stripe_percent = Some(pct);
+                                    changed = true;
+                                }
+                                if self.settings.stripe_percent.is_some() && ui.small_button("Default").clicked() {
+                                    self.settings.stripe_percent = None;
+                                    changed = true;
+                                }
+                            });
+                        });
                         ui.end_row();
 
                         ui.label("Bottom bar");
@@ -497,6 +523,9 @@ impl App {
                     ];
                     for (i, (t, c, bg)) in rows.iter().enumerate() {
                         let r = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0 + i as f32 * 22.0), egui::vec2(rect.width() - 8.0, 22.0));
+                        if let Some(stripe) = th.stripe.filter(|_| i % 2 == 1) {
+                            p.rect_filled(r, 0.0, stripe);
+                        }
                         if let Some(bg) = bg {
                             p.rect_filled(r, 3.0, *bg);
                         }
@@ -518,6 +547,12 @@ impl App {
                 let (c, p) = palette_ui(ctx, st);
                 close = c;
                 pick = p;
+            }
+            Modal::Conflict(d) => {
+                if let Some(reply) = d.ui(ctx) {
+                    d.q.answer(reply);
+                    close = true;
+                }
             }
         }
 
@@ -560,6 +595,250 @@ impl App {
             None => {}
         }
     }
+}
+
+/// "Overwrite: … With file: …", asked while a copy, move or unpack runs, with
+/// Double Commander's choices. Arrow keys move between the buttons, Enter picks,
+/// Esc cancels the job. The focus starts on Skip, so a stray Enter loses nothing.
+pub struct ConflictDialog {
+    pub q: crate::fs_ops::Conflict,
+    /// The button with the keyboard focus (see [`CHOICES`]).
+    focus: usize,
+    /// Showing the less common choices under "Other".
+    more: bool,
+    /// `Some(name)` while typing a new name for the incoming file.
+    rename: Option<String>,
+    compare: Compare,
+}
+
+enum Compare {
+    NotYet,
+    Running(std::sync::mpsc::Receiver<String>),
+    Done(String),
+}
+
+#[derive(Clone, Copy)]
+enum Choice {
+    Reply(fn() -> Reply),
+    Rename,
+    Compare,
+    Other,
+}
+
+/// Where the keyboard focus starts: the "Skip" button.
+const SKIP: usize = 1;
+
+/// The buttons, three to a row like Double Commander's; the last row shows under "Other".
+const CHOICES: [(&str, Choice); 13] = [
+    ("Overwrite", Choice::Reply(|| Reply::Overwrite)),
+    ("Skip", Choice::Reply(|| Reply::Skip)),
+    ("Rename…", Choice::Rename),
+    ("Overwrite All", Choice::Reply(|| Reply::All(ConflictPolicy::Overwrite))),
+    ("Skip All", Choice::Reply(|| Reply::All(ConflictPolicy::Skip))),
+    ("Compare by content", Choice::Compare),
+    ("Overwrite All Older", Choice::Reply(|| Reply::All(ConflictPolicy::OverwriteOlder))),
+    ("Cancel", Choice::Reply(|| Reply::Cancel)),
+    ("Other", Choice::Other),
+    ("Overwrite All Smaller", Choice::Reply(|| Reply::All(ConflictPolicy::OverwriteSmaller))),
+    ("Overwrite All Larger", Choice::Reply(|| Reply::All(ConflictPolicy::OverwriteLarger))),
+    ("Rename All New", Choice::Reply(|| Reply::All(ConflictPolicy::RenameNew))),
+    ("Rename All Existing", Choice::Reply(|| Reply::All(ConflictPolicy::RenameExisting))),
+];
+
+const MORE_HINTS: [&str; 4] = [
+    "Replace existing files only when they're smaller than the new ones; skip the rest",
+    "Replace existing files only when they're larger than the new ones; skip the rest",
+    "Give every new file a free name (“name copy.ext”), keeping the existing ones",
+    "Rename every existing file aside (“name copy.ext”), then put the new one in its place",
+];
+
+impl ConflictDialog {
+    pub fn new(q: crate::fs_ops::Conflict) -> Self {
+        ConflictDialog { q, focus: SKIP, more: false, rename: None, compare: Compare::NotYet }
+    }
+
+    fn can_compare(&self) -> bool {
+        let (a, b) = (&self.q.new, &self.q.existing);
+        a.real.is_some() && b.real.is_some() && !a.is_dir && !b.is_dir
+    }
+
+    fn visible(&self) -> usize {
+        if self.more { CHOICES.len() } else { 9 }
+    }
+
+    /// Draws the dialog. Returns the answer once one is picked.
+    pub fn ui(&mut self, ctx: &egui::Context) -> Option<Reply> {
+        if let Compare::Running(rx) = &self.compare {
+            match rx.try_recv() {
+                Ok(msg) => self.compare = Compare::Done(msg),
+                Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(50)),
+            }
+        }
+        if self.rename.is_some() {
+            return self.rename_ui(ctx);
+        }
+        let n = self.visible();
+        let mut picked = ctx.input_mut(|i| {
+            if i.consume_key(Modifiers::NONE, Key::ArrowRight) || i.consume_key(Modifiers::NONE, Key::Tab) {
+                self.focus = (self.focus + 1) % n;
+            }
+            if i.consume_key(Modifiers::NONE, Key::ArrowLeft) || i.consume_key(Modifiers::SHIFT, Key::Tab) {
+                self.focus = (self.focus + n - 1) % n;
+            }
+            if i.consume_key(Modifiers::NONE, Key::ArrowDown) && self.focus + 3 < n {
+                self.focus += 3;
+            }
+            if i.consume_key(Modifiers::NONE, Key::ArrowUp) && self.focus >= 3 {
+                self.focus -= 3;
+            }
+            if i.consume_key(Modifiers::NONE, Key::Escape) {
+                return Some(7); // Cancel
+            }
+            (i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Space)).then_some(self.focus)
+        });
+        let title = if self.q.existing.is_dir { "Folder already exists" } else { "File already exists" };
+        dialog(title).show(ctx, |ui| {
+            ui.set_width(620.0);
+            describe_side(ui, "Overwrite:", &self.q.existing);
+            ui.add_space(10.0);
+            describe_side(ui, "With:", &self.q.new);
+            match &self.compare {
+                Compare::NotYet => {}
+                Compare::Running(_) => {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Comparing…").color(theme::c().dim));
+                }
+                Compare::Done(msg) => {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(msg).color(theme::c().accent));
+                }
+            }
+            ui.add_space(14.0);
+            let w = (ui.available_width() - 2.0 * 10.0) / 3.0;
+            egui::Grid::new("conflict_buttons").spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                for (i, (label, choice)) in CHOICES.iter().enumerate().take(self.visible()) {
+                    let enabled = !matches!(choice, Choice::Compare) || self.can_compare();
+                    let label = if matches!(choice, Choice::Other) { if self.more { "Other ▴" } else { "Other ▾" } } else { label };
+                    let mut b = egui::Button::new(label).min_size(vec2(w, 30.0));
+                    if i == self.focus {
+                        b = b.fill(theme::c().cursor).stroke(egui::Stroke::new(1.0, theme::c().accent));
+                    }
+                    let mut r = ui.add_enabled(enabled, b);
+                    if i >= 9 {
+                        r = r.on_hover_text(MORE_HINTS[i - 9]);
+                    }
+                    if r.clicked() {
+                        picked = Some(i);
+                    }
+                    if i % 3 == 2 {
+                        ui.end_row();
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Arrow keys choose, Enter picks, Esc cancels the whole job").color(theme::c().dim).small());
+        });
+        match CHOICES.get(picked?)?.1 {
+            Choice::Reply(r) => Some(r()),
+            Choice::Rename => {
+                let name = crate::fs_ops::unique_copy_name(&self.q.target).file_name().map(|n| n.to_string_lossy().into_owned());
+                self.rename = Some(name.unwrap_or_default());
+                None
+            }
+            Choice::Compare => {
+                if self.can_compare() {
+                    self.start_compare();
+                }
+                None
+            }
+            Choice::Other => {
+                self.more = !self.more;
+                self.focus = if self.more { 9 } else { 8 };
+                None
+            }
+        }
+    }
+
+    fn start_compare(&mut self) {
+        let (Some(a), Some(b)) = (self.q.new.real.clone(), self.q.existing.real.clone()) else { return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use crate::fs_ops::Sameness;
+            let msg = match crate::fs_ops::compare_files(&a, &b) {
+                Ok(Sameness::Identical) => "Identical: the two files have the same contents.".to_string(),
+                Ok(Sameness::DifferentSize) => "Different: the files aren't the same size.".to_string(),
+                Ok(Sameness::DifferAt(at)) => format!("Different: they first differ at byte {}.", group_digits(at)),
+                Err(e) => format!("Couldn't compare them: {e}"),
+            };
+            let _ = tx.send(msg);
+        });
+        self.compare = Compare::Running(rx);
+    }
+
+    /// Typing a new name for the incoming file.
+    fn rename_ui(&mut self, ctx: &egui::Context) -> Option<Reply> {
+        let (enter, esc) = enter_esc(ctx);
+        let text = self.rename.as_mut()?;
+        let bad = text.contains('/') || text.trim().is_empty();
+        let mut ok = enter && !bad;
+        let mut back = esc;
+        dialog("Rename the new file").show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.label(format!("“{}” already exists. Put the new one there as:", self.q.target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
+            ui.add_space(6.0);
+            let r = ui.add(egui::TextEdit::singleline(text).id(egui::Id::new("conflict_rename")).desired_width(f32::INFINITY));
+            if !r.has_focus() {
+                r.request_focus();
+            }
+            if bad && !text.is_empty() {
+                ui.label(egui::RichText::new("A name can't contain “/”").color(theme::c().error).small());
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!bad, egui::Button::new("OK")).clicked() {
+                    ok = true;
+                }
+                if ui.button("Back").clicked() {
+                    back = true;
+                }
+            });
+        });
+        if back {
+            self.rename = None;
+            return None;
+        }
+        if ok {
+            let name = self.rename.take()?;
+            let dir = self.q.target.parent().map(Path::to_path_buf).unwrap_or_default();
+            return Some(Reply::RenameTo(dir.join(name.trim())));
+        }
+        None
+    }
+}
+
+/// "Overwrite:" + path + "77 232 bytes, 2026-11-18 14:59:18".
+fn describe_side(ui: &mut egui::Ui, heading: &str, f: &FileInfo) {
+    ui.label(egui::RichText::new(heading).color(theme::c().dim));
+    ui.add(egui::Label::new(egui::RichText::new(&f.shown).color(theme::c().text)).wrap());
+    let what = if f.is_dir { "Folder".to_string() } else { format!("{} bytes", group_digits(f.size)) };
+    let when = f
+        .modified
+        .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "unknown date".into());
+    ui.label(egui::RichText::new(format!("{what}, {when}")).color(theme::c().dim));
+}
+
+/// 77232 -> "77 232" (thin groups, like Double Commander shows sizes).
+pub fn group_digits(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push('\u{202f}');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Draws the searchable list. Returns (close, picked item).
@@ -684,6 +963,27 @@ fn palette_ui(ctx: &egui::Context, st: &mut PaletteState) -> (bool, Option<Palet
 }
 
 /// A searchable list of installed fonts. Returns true when the choice changed.
+/// The weight of a chosen font (Light, Regular, Bold…), from those installed.
+/// Hidden for the built-in font and for families with a single weight.
+fn weight_picker(ui: &mut egui::Ui, id: &str, family: &str, weight: &mut u16) -> bool {
+    let weights = if family.is_empty() { Vec::new() } else { theme::font_weights(family) };
+    if weights.len() < 2 {
+        return false;
+    }
+    // Show what will actually be used: the installed weight nearest the setting.
+    let nearest = *weights.iter().min_by_key(|w| w.abs_diff(*weight)).unwrap_or(&400);
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id).width(120.0).selected_text(theme::weight_name(nearest)).show_ui(ui, |ui| {
+        for w in weights {
+            if ui.selectable_label(w == nearest, format!("{} ({w})", theme::weight_name(w))).clicked() {
+                *weight = w;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
 fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, filter: &mut String, mono: bool) -> bool {
     let mut changed = false;
     let shown = if value.is_empty() { "Built-in".to_string() } else { value.clone() };
@@ -706,4 +1006,52 @@ fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, filter: &mut Str
         }
     });
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs_ops::Conflict;
+
+    /// Opens the conflict dialog, presses `keys` one frame each, and returns the
+    /// answer it gave (if any).
+    fn press(keys: &[Key]) -> Option<Reply> {
+        let info = |p: &str| FileInfo::of(Path::new(p));
+        let (q, _rx) = Conflict::for_test(info("/new/x.txt"), info("/old/x.txt"), PathBuf::from("/old/x.txt"));
+        let mut d = ConflictDialog::new(q);
+        let ctx = egui::Context::default();
+        let mut answer = None;
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput { events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                if let Some(r) = d.ui(ctx) {
+                    answer = Some(r);
+                }
+            });
+        };
+        frame(vec![]);
+        for &key in keys {
+            frame(vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+        }
+        answer
+    }
+
+    #[test]
+    fn conflict_dialog_keys() {
+        // The focus starts on Skip: a stray Enter never overwrites.
+        assert_eq!(press(&[Key::Enter]), Some(Reply::Skip));
+        assert_eq!(press(&[Key::ArrowLeft, Key::Enter]), Some(Reply::Overwrite));
+        assert_eq!(press(&[Key::ArrowDown, Key::Enter]), Some(Reply::All(ConflictPolicy::Skip)));
+        assert_eq!(press(&[Key::ArrowLeft, Key::ArrowDown, Key::ArrowDown, Key::Enter]), Some(Reply::All(ConflictPolicy::OverwriteOlder)));
+        assert_eq!(press(&[Key::Escape]), Some(Reply::Cancel));
+        // "Other" opens the extra row with the focus on its first button.
+        let other = [Key::ArrowDown, Key::ArrowDown, Key::ArrowRight, Key::Enter];
+        assert_eq!(press(&[&other[..], &[Key::Enter]].concat()), Some(Reply::All(ConflictPolicy::OverwriteSmaller)));
+        assert_eq!(press(&[&other[..], &[Key::ArrowRight, Key::ArrowRight, Key::ArrowRight, Key::Enter]].concat()), Some(Reply::All(ConflictPolicy::RenameExisting)));
+        // Rename suggests a free name; Enter accepts it, Esc goes back to the choices.
+        assert_eq!(press(&[Key::ArrowRight, Key::Enter, Key::Enter]), Some(Reply::RenameTo(PathBuf::from("/old/x copy.txt"))));
+        assert_eq!(press(&[Key::ArrowRight, Key::Enter, Key::Escape]), None);
+        // Compare can't run on files that don't exist, so nothing happens.
+        assert_eq!(press(&[Key::ArrowDown, Key::ArrowRight, Key::Enter]), None);
+    }
 }

@@ -1,7 +1,7 @@
 //! Packing files into archives and unpacking them (Alt+F5 / Alt+F9),
 //! plus a contents listing for the lister. ZIP, TAR.GZ and TAR are supported.
 
-use crate::fs_ops::Ctx;
+use crate::fs_ops::{Ctx, FileInfo};
 use chrono::{Datelike, Timelike};
 use std::cell::Cell;
 use std::fs::{self, File};
@@ -244,7 +244,27 @@ pub fn unpack_size(archive: &Path) -> u64 {
     fs::metadata(archive).map(|m| m.len()).unwrap_or(0)
 }
 
-/// Unpacks `archive` into the folder `dest` (which must exist).
+/// Where `archive` unpacks to: `dest` itself, or a folder in it named after the archive.
+pub fn unpack_target(archive: &Path, dest: &Path, into_folder: bool) -> PathBuf {
+    if into_folder {
+        let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        dest.join(strip_archive_ext(&name))
+    } else {
+        dest.to_path_buf()
+    }
+}
+
+/// Describes a file inside an archive, for the "already exists" question.
+fn entry_info(archive: &Path, name: &str, size: u64, modified: Option<std::time::SystemTime>) -> FileInfo {
+    FileInfo { shown: format!("{} › {name}", archive.display()), real: None, size, modified, is_dir: false }
+}
+
+fn tar_time(h: &tar::Header) -> Option<std::time::SystemTime> {
+    h.mtime().ok().map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s))
+}
+
+/// Unpacks `archive` into the folder `dest` (which must exist). Files that already
+/// exist are settled by [`Ctx::place`] (asking, skipping, renaming…).
 pub fn unpack(archive: &Path, dest: &Path, ctx: &mut Ctx) {
     let r = if is_zip(archive) { unpack_zip(archive, dest, ctx) } else { unpack_tar(archive, dest, ctx) };
     if let Err(e) = r {
@@ -271,12 +291,19 @@ fn unpack_zip(archive: &Path, dest: &Path, ctx: &mut Ctx) -> io::Result<()> {
             ctx.error(archive, format!("skipped unsafe name {}", f.name()));
             continue;
         };
-        let out = dest.join(rel);
+        let out = dest.join(&rel);
         ctx.report(&out, false);
         let r: io::Result<()> = (|| {
+            no_links_on_the_way(dest, &rel)?;
             if f.is_dir() {
                 return fs::create_dir_all(&out);
             }
+            let info = entry_info(archive, &rel.to_string_lossy(), f.size(), f.last_modified().and_then(zip_to_system));
+            let Some(out) = ctx.place(&info, &out) else {
+                ctx.done += f.size();
+                return Ok(());
+            };
+            no_links_on_the_way(dest, out.strip_prefix(dest).unwrap_or(&out))?;
             if let Some(p) = out.parent() {
                 fs::create_dir_all(p)?;
             }
@@ -344,6 +371,29 @@ fn unpack_tar(archive: &Path, dest: &Path, ctx: &mut Ctx) -> io::Result<()> {
             }
         };
         let name = e.path().map(|p| p.into_owned()).unwrap_or_default();
+        // Something already there? Settle it first (ask, skip, rename…).
+        let rel = clean_name(&name.to_string_lossy());
+        let is_dir = e.header().entry_type().is_dir();
+        let existing = rel.as_ref().map(|r| dest.join(r)).filter(|o| !is_dir && o.symlink_metadata().is_ok());
+        if let (Some(rel), Some(out)) = (&rel, existing) {
+            let info = entry_info(archive, rel, e.header().size().unwrap_or(0), tar_time(e.header()));
+            match ctx.place(&info, &out) {
+                None => {
+                    ctx.done = base + count.get();
+                    continue;
+                }
+                Some(p) if p != out => {
+                    // Renamed: unpack under the new name (same folder, checked like any other).
+                    let r = no_links_on_the_way(dest, p.strip_prefix(dest).unwrap_or(&p)).and_then(|_| e.unpack(&p).map(|_| ()));
+                    if let Err(err) = r {
+                        ctx.error(&p, err);
+                    }
+                    ctx.done = base + count.get();
+                    continue;
+                }
+                Some(_) => {}
+            }
+        }
         // unpack_in refuses to write outside `dest`.
         match e.unpack_in(dest) {
             Ok(true) => {}
@@ -352,6 +402,26 @@ fn unpack_tar(archive: &Path, dest: &Path, ctx: &mut Ctx) -> io::Result<()> {
         }
         ctx.done = base + count.get();
         ctx.report(&dest.join(&name), false);
+    }
+    Ok(())
+}
+
+/// Guards against an archive that first makes a symlink ("link" -> ~/.ssh) and then
+/// writes through it ("link/authorized_keys"), landing outside `dest`: refuses when a
+/// folder on the way from `dest` to `rel` is a symlink, and removes a symlink sitting
+/// at `rel` itself so the new entry replaces it instead of writing to where it points.
+fn no_links_on_the_way(dest: &Path, rel: &Path) -> io::Result<()> {
+    let mut cur = dest.to_path_buf();
+    let mut parts = rel.components().peekable();
+    while let Some(part) = parts.next() {
+        cur.push(part);
+        let Ok(m) = fs::symlink_metadata(&cur) else { return Ok(()) }; // the rest doesn't exist yet
+        if m.file_type().is_symlink() {
+            if parts.peek().is_some() {
+                return Err(io::Error::other("refused to write through a symbolic link"));
+            }
+            fs::remove_file(&cur)?;
+        }
     }
     Ok(())
 }
@@ -473,10 +543,19 @@ pub fn extract(archive: &Path, items: &[String], base: &str, dest: &Path, ctx: &
                 }
                 let out = target(&name);
                 ctx.report(&out, false);
+                if let Err(err) = no_links_on_the_way(dest, out.strip_prefix(dest).unwrap_or(&out)) {
+                    ctx.error(&out, err);
+                    continue;
+                }
                 if f.is_dir() {
                     fs::create_dir_all(&out)?;
                     continue;
                 }
+                let info = entry_info(archive, &name, f.size(), f.last_modified().and_then(zip_to_system));
+                let Some(out) = ctx.place(&info, &out) else {
+                    ctx.done += f.size();
+                    continue;
+                };
                 if let Some(p) = out.parent() {
                     fs::create_dir_all(p)?;
                 }
@@ -514,10 +593,25 @@ pub fn extract(archive: &Path, items: &[String], base: &str, dest: &Path, ctx: &
                     continue;
                 }
                 let out = target(&name);
+                if let Err(err) = no_links_on_the_way(dest, out.strip_prefix(dest).unwrap_or(&out)) {
+                    ctx.error(&out, err);
+                    continue;
+                }
                 if let Some(p) = out.parent() {
                     fs::create_dir_all(p)?;
                 }
                 let size = e.header().size().unwrap_or(0);
+                let out = if e.header().entry_type().is_dir() {
+                    out
+                } else {
+                    match ctx.place(&entry_info(archive, &name, size, tar_time(e.header())), &out) {
+                        Some(p) => p,
+                        None => {
+                            ctx.done += size;
+                            continue;
+                        }
+                    }
+                };
                 if let Err(err) = e.unpack(&out) {
                     ctx.error(&out, err);
                 }
@@ -618,7 +712,7 @@ pub fn listing(archive: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs_ops::{start, JobSpec};
+    use crate::fs_ops::{start, ConflictPolicy, JobSpec};
 
     fn wait(mut h: crate::fs_ops::JobHandle) -> Vec<String> {
         while !h.poll() {
@@ -648,7 +742,7 @@ mod tests {
             assert!(listing(&arc).unwrap().contains("Photos/2024/a.txt"));
             let dest = base.join("x");
             fs::create_dir_all(&dest).unwrap();
-            let errs = wait(start(JobSpec::Unpack { archives: vec![arc.clone()], dest: dest.clone(), into_folder: true }));
+            let errs = wait(start(JobSpec::Unpack { archives: vec![arc.clone()], dest: dest.clone(), into_folder: true, policy: ConflictPolicy::Overwrite }));
             assert!(errs.is_empty(), "{format:?} unpack: {errs:?}");
             let root = dest.join("out");
             assert_eq!(fs::read(root.join("Photos/2024/a.txt")).unwrap(), b"hello");
@@ -681,7 +775,7 @@ mod tests {
             // Copy "docs" out while looking at "src": it lands as dest/docs/...
             let dest = base.join(format!("out-{}", format.ext()));
             fs::create_dir_all(&dest).unwrap();
-            let errs = wait(start(JobSpec::Extract { archive: arc.clone(), items: vec!["src/docs".into()], base: "src".into(), dest: dest.clone() }));
+            let errs = wait(start(JobSpec::Extract { archive: arc.clone(), items: vec!["src/docs".into()], base: "src".into(), dest: dest.clone(), policy: ConflictPolicy::Overwrite }));
             assert!(errs.is_empty(), "{errs:?}");
             assert_eq!(fs::read(dest.join("docs/deep/x.txt")).unwrap(), b"x");
             let one = base.join("one.txt");
@@ -690,6 +784,139 @@ mod tests {
         }
         assert_eq!(clean_name("./a//b/"), Some("a/b".into()));
         assert_eq!(clean_name("../evil"), None);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unpack_skips_or_replaces_existing() {
+        let base = std::env::temp_dir().join(format!("duopane-skip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("src/sub")).unwrap();
+        fs::write(base.join("src/sub/a.txt"), b"from archive").unwrap();
+        fs::write(base.join("src/sub/b.txt"), b"from archive").unwrap();
+        for format in [Format::Zip, Format::TarGz] {
+            let arc = base.join(format!("a.{}", format.ext()));
+            wait(start(JobSpec::Pack { sources: vec![base.join("src/sub")], archive: arc.clone(), format, level: 6, delete_after: false }));
+            for (policy, expect) in [(ConflictPolicy::Skip, &b"mine"[..]), (ConflictPolicy::Overwrite, &b"from archive"[..])] {
+                let dest = base.join(format!("out-{}-{policy:?}", format.ext()));
+                fs::create_dir_all(dest.join("sub")).unwrap();
+                fs::write(dest.join("sub/a.txt"), b"mine").unwrap();
+                let errs = wait(start(JobSpec::Unpack { archives: vec![arc.clone()], dest: dest.clone(), into_folder: false, policy }));
+                assert!(errs.is_empty(), "{format:?} {policy:?}: {errs:?}");
+                assert_eq!(fs::read(dest.join("sub/a.txt")).unwrap(), expect, "{format:?} {policy:?}");
+                assert_eq!(fs::read(dest.join("sub/b.txt")).unwrap(), b"from archive", "{format:?} {policy:?}");
+
+                let dest = base.join(format!("ex-{}-{policy:?}", format.ext()));
+                fs::create_dir_all(dest.join("sub")).unwrap();
+                fs::write(dest.join("sub/a.txt"), b"mine").unwrap();
+                let errs = wait(start(JobSpec::Extract { archive: arc.clone(), items: vec!["sub".into()], base: String::new(), dest: dest.clone(), policy }));
+                assert!(errs.is_empty(), "{format:?} {policy:?}: {errs:?}");
+                assert_eq!(fs::read(dest.join("sub/a.txt")).unwrap(), expect, "extract {format:?} {policy:?}");
+                assert_eq!(fs::read(dest.join("sub/b.txt")).unwrap(), b"from archive", "extract {format:?} {policy:?}");
+            }
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unpack_asks_and_can_rename() {
+        use crate::fs_ops::Reply;
+        let base = std::env::temp_dir().join(format!("duopane-unask-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("src/sub")).unwrap();
+        fs::write(base.join("src/sub/a.txt"), b"from archive").unwrap();
+        for format in [Format::Zip, Format::TarGz] {
+            let arc = base.join(format!("a.{}", format.ext()));
+            wait(start(JobSpec::Pack { sources: vec![base.join("src/sub")], archive: arc.clone(), format, level: 6, delete_after: false }));
+            let dest = base.join(format!("out-{}", format.ext()));
+            fs::create_dir_all(dest.join("sub")).unwrap();
+            fs::write(dest.join("sub/a.txt"), b"mine").unwrap();
+            let mut h = start(JobSpec::Unpack { archives: vec![arc.clone()], dest: dest.clone(), into_folder: false, policy: ConflictPolicy::Ask });
+            let mut asked = 0;
+            while !h.poll() {
+                if let Some(q) = h.conflict.take() {
+                    asked += 1;
+                    assert!(q.new.shown.contains("a.txt") && q.new.real.is_none(), "{}", q.new.shown);
+                    assert_eq!(q.new.size, 12);
+                    q.answer(Reply::RenameTo(dest.join("sub/a (from archive).txt")));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(h.finished.unwrap().0.is_empty());
+            assert_eq!(asked, 1, "{format:?}");
+            assert_eq!(fs::read(dest.join("sub/a.txt")).unwrap(), b"mine");
+            assert_eq!(fs::read(dest.join("sub/a (from archive).txt")).unwrap(), b"from archive", "{format:?}");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// An archive with "link" -> `outside`, then "link/evil.txt" and "trap" -> `outside`/victim.txt,
+    /// then a plain file "trap": none of it may touch `outside`.
+    fn hostile(base: &Path, outside: &Path, format: Format) -> PathBuf {
+        let victim = outside.join("victim.txt");
+        let arc = base.join(format!("hostile.{}", format.ext()));
+        match format {
+            Format::Zip => {
+                let mut zw = zip::ZipWriter::new(File::create(&arc).unwrap());
+                let o = zip::write::SimpleFileOptions::default();
+                zw.add_symlink("link", outside.to_string_lossy(), o).unwrap();
+                zw.start_file("link/evil.txt", o).unwrap();
+                zw.write_all(b"pwned").unwrap();
+                zw.add_symlink("trap", victim.to_string_lossy(), o).unwrap();
+                zw.start_file("./trap", o).unwrap();
+                zw.write_all(b"pwned").unwrap();
+                zw.finish().unwrap();
+            }
+            _ => {
+                let mut tb = tar::Builder::new(File::create(&arc).unwrap());
+                let link = |tb: &mut tar::Builder<File>, name: &str, to: &Path| {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_entry_type(tar::EntryType::Symlink);
+                    h.set_size(0);
+                    h.set_mode(0o777);
+                    tb.append_link(&mut h, name, to).unwrap();
+                };
+                let file = |tb: &mut tar::Builder<File>, name: &str| {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_size(5);
+                    h.set_mode(0o644);
+                    tb.append_data(&mut h, name, &b"pwned"[..]).unwrap();
+                };
+                link(&mut tb, "link", outside);
+                file(&mut tb, "link/evil.txt");
+                link(&mut tb, "trap", &victim);
+                file(&mut tb, "trap");
+                tb.finish().unwrap();
+            }
+        }
+        arc
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hostile_archives_stay_inside() {
+        let base = std::env::temp_dir().join(format!("duopane-hostile-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let outside = base.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim.txt"), b"precious").unwrap();
+        for format in [Format::Zip, Format::Tar] {
+            let arc = hostile(&base, &outside, format);
+            let unpack_to = base.join(format!("unpack-{}", format.ext()));
+            let extract_to = base.join(format!("extract-{}", format.ext()));
+            fs::create_dir_all(&unpack_to).unwrap();
+            fs::create_dir_all(&extract_to).unwrap();
+            wait(start(JobSpec::Unpack { archives: vec![arc.clone()], dest: unpack_to.clone(), into_folder: false, policy: ConflictPolicy::Overwrite }));
+            wait(start(JobSpec::Extract {
+                archive: arc.clone(),
+                items: vec!["link".into(), "trap".into()],
+                base: String::new(),
+                dest: extract_to.clone(),
+                policy: ConflictPolicy::Overwrite,
+            }));
+            assert!(!outside.join("evil.txt").exists(), "{format:?} wrote through a link");
+            assert_eq!(fs::read(outside.join("victim.txt")).unwrap(), b"precious", "{format:?} overwrote the link target");
+        }
         let _ = fs::remove_dir_all(&base);
     }
 

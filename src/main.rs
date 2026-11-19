@@ -11,7 +11,7 @@
 //! - `archive.rs`  – ZIP and TAR(.GZ) packing, unpacking and listing
 //! - `settings.rs` – the settings file (paths, bookmarks, key bindings, custom commands)
 //! - `lister.rs`   – the F3 viewer (text, pictures, PDF, music, video); loading in
-//!                   `lister_load.rs`, playback in `media.rs`
+//!   `lister_load.rs`, playback in `media.rs`
 //! - `rename.rs`   – batch rename patterns ([N], [E], [C], ...) and clash checks
 //! - `fuzzy.rs`    – the fuzzy matcher used by "Go to" and the command palette
 //! - `theme.rs`    – colour schemes, fonts and sizes
@@ -25,6 +25,8 @@ mod fs_ops;
 mod lister;
 mod lister_load;
 mod media;
+#[cfg(target_os = "linux")]
+mod native_drag;
 mod fuzzy;
 mod pane;
 mod rename;

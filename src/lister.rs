@@ -56,6 +56,10 @@ struct Find {
     focus: bool,
 }
 
+/// Wrapped text, worked out for one width: (columns, rows), where each row is
+/// (line number, first character, end character) within that line.
+type WrapRows = (usize, Vec<(usize, usize, usize)>);
+
 pub struct Lister {
     pub path: PathBuf,
     name: String,
@@ -71,7 +75,7 @@ pub struct Lister {
     want_offset: Option<f32>,
     offset: f32,
     view_h: f32,
-    wrap_rows: Option<(usize, Vec<(usize, usize, usize)>)>,
+    wrap_rows: Option<WrapRows>,
     /// The scale used when fitting to the window (zooming starts from here).
     fit: f32,
     plugins: Vec<crate::settings::ListerPlugin>,
