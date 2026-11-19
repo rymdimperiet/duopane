@@ -318,12 +318,6 @@ on Linux, Windows and macOS.
 pictures, music, archives…) and starts Duopane in it, with its own settings, so
 screenshots don't show your real files or paths. `--rebuild` starts it over.
 
-### Ideas for next steps
-
-- Tabs per pane, or a quick-look preview of the selected file
-- Remote locations (SFTP) as extra "file systems"
-- A plugin system that loads scripts at startup
-
 ## Status and known limitations
 
 Duopane is young. It's in daily use on Linux (KDE Plasma on Wayland) and has a
@@ -335,10 +329,9 @@ test suite, but expect rough edges, and please report them.
 - **Desktops:** developed on KDE Plasma (Wayland). X11 and other desktops should
   work but are less tested. On X11, dragging files to other apps goes through
   ripdrag or dragon-drop.
-- **Not there yet:** tabs, searching inside files, remote locations (SFTP and
+- **Not there yet:** searching inside files, remote locations (SFTP and
   the like, beyond what's mounted), and a side-by-side file comparison.
 - **The viewer leans on other tools** for some files: poppler for PDFs, ffmpeg for video.
-- Variable fonts only offer their default weight.
 
 ## How it was made
 
@@ -348,5 +341,4 @@ and test it daily; most of the code was written by Claude.
 
 ## Licence
 
-MIT; see [LICENSE](LICENSE). Duopane was written from scratch, inspired by the way
-fman works; it contains no code from fman.
+MIT; see [LICENSE](LICENSE). Duopane was written from scratch, inspired by fman and Double Commander.
