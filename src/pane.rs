@@ -22,7 +22,7 @@ pub enum SortKey {
     Extension,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub name: String,
     pub path: PathBuf,
@@ -90,11 +90,23 @@ pub struct Pane {
     want_cursor: Option<String>,
     /// How long to wait for a read before going on in the background ([`LOAD_WAIT`]).
     load_wait: Duration,
+    /// Set while showing search results instead of a folder ("feed to listbox").
+    /// `path` is then the folder that was searched.
+    pub results: Option<Arc<ResultSet>>,
+}
+
+/// Search results shown in a pane like a folder.
+pub struct ResultSet {
+    /// What was searched for, and where (shown in the path bar).
+    pub query: String,
+    pub root: PathBuf,
+    pub paths: Vec<PathBuf>,
 }
 
 /// A folder (or a folder inside an archive) as read from disk, on any thread.
 enum Fetched {
     Dir { all: Vec<Entry>, mtime: Option<SystemTime> },
+    Results { all: Vec<Entry>, set: Arc<ResultSet> },
     Archive { all: Vec<Entry>, state: ArchiveState },
 }
 
@@ -139,6 +151,7 @@ impl Pane {
             loading: None,
             want_cursor: None,
             load_wait: LOAD_WAIT,
+            results: None,
         };
         let fallbacks = [
             path.to_path_buf(),
@@ -158,12 +171,20 @@ impl Pane {
     /// [`Pane::poll_loading`] picks the result up. Errors that arrive straight away
     /// are returned; later ones come out of `poll_loading`.
     fn start_load(&mut self, path: &Path, then: After) -> Result<(), String> {
+        self.start_load_as(path, then, None)
+    }
+
+    /// Like [`Pane::start_load`], showing search results when `results` is given.
+    fn start_load_as(&mut self, path: &Path, then: After, results: Option<Arc<ResultSet>>) -> Result<(), String> {
         self.loading = None; // a newer request replaces an unfinished one
         let cache = self.archive.as_ref().map(|a| (a.file.clone(), a.mtime, a.index.clone()));
         let (tx, rx) = mpsc::channel();
         let p = path.to_path_buf();
         std::thread::spawn(move || {
-            let _ = tx.send(fetch(&p, cache));
+            let _ = tx.send(match results {
+                Some(set) => Ok(fetch_results(set)),
+                None => fetch(&p, cache),
+            });
         });
         match rx.recv_timeout(self.load_wait) {
             Ok(r) => self.complete(path, then, r).map(|_| ()),
@@ -230,12 +251,20 @@ impl Pane {
             Fetched::Dir { all, mtime } => {
                 self.all = all;
                 self.archive = None;
+                self.results = None;
                 self.dir_mtime = mtime;
+            }
+            Fetched::Results { all, set } => {
+                self.all = all;
+                self.archive = None;
+                self.results = Some(set);
+                self.dir_mtime = None;
             }
             Fetched::Archive { all, state } => {
                 self.all = all;
                 self.dir_mtime = state.mtime;
                 self.archive = Some(state);
+                self.results = None;
             }
         }
         self.error = None;
@@ -326,8 +355,10 @@ impl Pane {
                 }
             })
         });
+        // In search results, ".." leads back to the folder that was searched.
+        let up = if self.results.is_some() { Some(self.path.as_path()) } else { self.path.parent() };
         if self.show_dotdot {
-            if let Some(parent) = self.path.parent() {
+            if let Some(parent) = up {
                 entries.insert(
                     0,
                     Entry { name: "..".into(), path: parent.to_path_buf(), is_dir: true, is_symlink: false, size: 0, modified: None },
@@ -373,7 +404,7 @@ impl Pane {
     /// Opens another folder, remembering where we came from.
     pub fn navigate(&mut self, path: &Path) -> Result<(), String> {
         let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if path == self.path {
+        if path == self.path && self.results.is_none() {
             self.loading = None; // e.g. clicked back to here while another folder was loading
             self.reload();
             return Ok(());
@@ -399,7 +430,34 @@ impl Pane {
         self.scroll_to_cursor = true;
     }
 
+    /// Shows search results in the pane, like a folder (Backspace or ".." goes back
+    /// to the folder that was searched).
+    pub fn show_results(&mut self, set: ResultSet) -> Result<(), String> {
+        let old = self.path.clone();
+        let root = set.root.clone();
+        self.start_load_as(&root, After::Navigate { old }, Some(Arc::new(set)))
+    }
+
+    /// Something was renamed: search results follow it (and anything inside it).
+    pub fn renamed(&mut self, from: &Path, to: &Path) {
+        let Some(set) = &self.results else { return };
+        let paths = set
+            .paths
+            .iter()
+            .map(|p| match p.strip_prefix(from) {
+                Ok(rest) if rest.as_os_str().is_empty() => to.to_path_buf(),
+                Ok(rest) => to.join(rest),
+                Err(_) => p.clone(),
+            })
+            .collect();
+        self.results = Some(Arc::new(ResultSet { query: set.query.clone(), root: set.root.clone(), paths }));
+    }
+
     pub fn go_up(&mut self) -> Result<(), String> {
+        if self.results.is_some() {
+            let root = self.path.clone();
+            return self.navigate(&root);
+        }
         match self.path.parent() {
             Some(parent) => {
                 let parent = parent.to_path_buf();
@@ -428,13 +486,16 @@ impl Pane {
             return;
         }
         let path = self.path.clone();
-        if let Err(e) = self.start_load(&path, After::Reload { gone: None }) {
+        if let Err(e) = self.start_load_as(&path, After::Reload { gone: None }, self.results.clone()) {
             self.error = Some(e);
         }
     }
 
     /// True when the folder changed on disk since it was read.
     pub fn changed_on_disk(&self) -> bool {
+        if self.results.is_some() {
+            return false; // results are re-checked after file operations instead
+        }
         let watched = self.archive.as_ref().map(|a| a.file.as_path()).unwrap_or(&self.path);
         let now = fs::metadata(watched).and_then(|m| m.modified()).ok();
         now != self.dir_mtime
@@ -628,6 +689,11 @@ impl Mask {
     }
 }
 
+/// Wildcard match of a whole name against a mask with `*` and `?` (exact case).
+pub(crate) fn glob_str(mask: &str, name: &str) -> bool {
+    glob(&mask.chars().collect::<Vec<_>>(), &name.chars().collect::<Vec<_>>())
+}
+
 /// Wildcard match with `*` and `?`.
 fn glob(p: &[char], s: &[char]) -> bool {
     let (mut pi, mut si) = (0, 0);
@@ -666,6 +732,31 @@ fn fetch(path: &Path, cache: IndexCache) -> Result<Fetched, String> {
     let all = read_entries(path).map_err(|e| format!("Can't open {}: {}", path.display(), e))?;
     let mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
     Ok(Fetched::Dir { all, mtime })
+}
+
+/// Search results as entries: named by their path below the searched folder, so
+/// files with the same name in different folders stay apart. Ones that no longer
+/// exist are left out.
+fn fetch_results(set: Arc<ResultSet>) -> Fetched {
+    let all = set
+        .paths
+        .iter()
+        .filter_map(|p| {
+            let lmeta = fs::symlink_metadata(p).ok()?;
+            let is_symlink = lmeta.file_type().is_symlink();
+            let meta = if is_symlink { fs::metadata(p).unwrap_or(lmeta) } else { lmeta };
+            let name = p.strip_prefix(&set.root).unwrap_or(p).to_string_lossy().into_owned();
+            Some(Entry {
+                name,
+                path: p.clone(),
+                is_dir: meta.is_dir(),
+                is_symlink,
+                size: if meta.is_dir() { 0 } else { meta.len() },
+                modified: meta.modified().ok(),
+            })
+        })
+        .collect();
+    Fetched::Results { all, set }
 }
 
 /// Lists a folder inside an archive, like a normal folder.
@@ -920,6 +1011,39 @@ mod tests {
         assert!(p.navigate(&dir.join("missing")).is_ok());
         assert!(settle(&mut p).is_err());
         assert_eq!(p.path, dir.join("a"), "a failed read leaves the pane where it was");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_results_as_a_folder() {
+        let dir = std::env::temp_dir().join(format!("duopane-results-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        fs::write(dir.join("a/x.txt"), b"1").unwrap();
+        fs::write(dir.join("b/x.txt"), b"22").unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let mut p = Pane::new(&dir, false, true, SortKey::Name, true);
+        let set = ResultSet { query: "x".into(), root: dir.clone(), paths: vec![dir.join("a/x.txt"), dir.join("b/x.txt"), dir.join("gone.txt")] };
+        p.show_results(set).unwrap();
+        assert!(p.results.is_some());
+        let names: Vec<&str> = p.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["..", "a/x.txt", "b/x.txt"], "same names kept apart; vanished files left out");
+        assert_eq!(p.entries[0].path, dir, "\"..\" leads back to the searched folder");
+        assert_eq!(p.entries[2].size, 2);
+        p.select_all();
+        assert_eq!(p.targets(), vec![dir.join("a/x.txt"), dir.join("b/x.txt")]);
+        assert!(!p.changed_on_disk());
+
+        // After a file operation, results are re-checked.
+        fs::remove_file(dir.join("a/x.txt")).unwrap();
+        p.reload();
+        assert_eq!(p.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["..", "b/x.txt"]);
+
+        p.go_up().unwrap();
+        assert!(p.results.is_none());
+        assert_eq!(p.path, dir);
+        assert_eq!(p.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["..", "a", "b"]);
         let _ = fs::remove_dir_all(&dir);
     }
 

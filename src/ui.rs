@@ -184,9 +184,15 @@ impl App {
                 let b1 = self.settings.bookmarks.contains(&self.panes[1].path);
                 let (left, right) = self.panes.split_at_mut(1);
                 let actions = &mut self.actions;
+                let quick_view = &mut self.quick_view;
                 ui.columns(2, |cols| {
-                    pane_ui(&mut cols[0], &mut left[0], 0, active == 0, b0, actions);
-                    pane_ui(&mut cols[1], &mut right[0], 1, active == 1, b1, actions);
+                    let panes = [(&mut left[0], b0), (&mut right[0], b1)];
+                    for (idx, (col, (pane, bookmarked))) in cols.iter_mut().zip(panes).enumerate() {
+                        match quick_view {
+                            Some(qv) if qv.slot == idx => qv.ui(col),
+                            _ => pane_ui(col, pane, idx, active == idx, bookmarked, actions),
+                        }
+                    }
                 });
             });
         drag_label(ctx);
@@ -352,6 +358,13 @@ fn drag_label(ctx: &egui::Context) {
         });
 }
 
+/// The home folder, as a real path (it may be reached through a link, e.g.
+/// /home -> /var/home), so it matches the panes' paths.
+fn home_dir() -> Option<&'static Path> {
+    static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| dirs::home_dir().map(|h| std::fs::canonicalize(&h).unwrap_or(h))).as_deref()
+}
+
 /// The clickable folder path at the top of a pane (Ctrl+L to type one).
 fn path_bar(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmarked: bool, w: f32, actions: &mut Vec<Action>) {
     let (bar_rect, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
@@ -374,6 +387,16 @@ fn path_bar(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookma
         }
         return;
     }
+    if let Some(r) = &pane.results {
+        let n = pane.entries.iter().filter(|e| !e.is_up()).count();
+        let text = egui::RichText::new(format!("🔍  Search results for “{}” in {}  ·  {}", r.query, crate::app::tilde(&r.root), plural(n, "item")))
+            .color(if active { theme::c().text } else { theme::c().dim });
+        let b = bar.add(egui::Button::new(text).frame(false)).on_hover_text("Back to the folder (Backspace)");
+        if b.clicked() {
+            actions.push(Action::Navigate(idx, r.root.clone()));
+        }
+        return;
+    }
     egui::ScrollArea::horizontal()
         .id_salt(("crumbs", idx))
         .stick_to_right(true)
@@ -383,9 +406,15 @@ fn path_bar(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookma
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let parts: Vec<PathBuf> = pane.path.ancestors().map(Path::to_path_buf).collect();
                 let n = parts.len();
-                for (i, p) in parts.into_iter().rev().enumerate() {
+                // Inside the home folder the path starts at "~" (like everywhere else in
+                // Duopane), rather than spelling out /home/<name>.
+                let home = home_dir().filter(|h| pane.path.starts_with(h) && h.parent().is_some());
+                let skip = home.map_or(0, |h| h.ancestors().count() - 1);
+                for (i, p) in parts.into_iter().rev().enumerate().skip(skip) {
                     let label = if i == 0 {
                         "/".to_string()
+                    } else if i == skip {
+                        "~".to_string()
                     } else {
                         p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                     };
@@ -509,6 +538,9 @@ fn row_ui(
             ("rename", "Rename…"),
             ("copy", "Copy to other pane…"),
             ("move", "Move to other pane…"),
+            ("clip_copy", "Copy"),
+            ("clip_cut", "Cut"),
+            ("clip_paste", "Paste here"),
             ("copy_path", "Copy path"),
             ("drag_out", "Drag to another app…"),
             ("pack", "Pack (compress)…"),
@@ -627,6 +659,7 @@ fn columns(rect: egui::Rect, w: &ColWidths) -> (egui::Rect, egui::Rect, egui::Re
 fn short_label(id: &str) -> Option<&'static str> {
     Some(match id {
         "help" => "Help",
+        "about" => "About",
         "rename" => "Rename",
         "view" => "View",
         "edit" => "Edit",

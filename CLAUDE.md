@@ -22,7 +22,9 @@ rustfmt's default and a blanket reformat touches hundreds of places.
 
 `src/main.rs` has the module map. In short: `app.rs` (state, frame loop, keys),
 `actions.rs` (what commands do), `commands.rs` (command list and default keys),
-`ui.rs` / `dialogs.rs` (drawing), `pane.rs` (one folder listing),
+`ui.rs` / `dialogs.rs` (drawing), `pane.rs` (one folder listing, or search
+results shown as one), `search.rs` + `search_ui.rs` (Find files), `quickview.rs`
+(Ctrl+Q),
 `fs_ops.rs` (background copy/move/delete/pack/unpack jobs), `archive.rs`
 (zip/tar), `lister*.rs` + `media.rs` (F3 viewer), `settings.rs`, `theme.rs`.
 
@@ -67,6 +69,12 @@ rustfmt's default and a blanket reformat touches hundreds of places.
   drags offer copy and move, but Duopane never deletes anything when one ends:
   a file manager taking a move does it itself. Drags from other apps are only
   accepted as copies.
+- The file clipboard (Ctrl+C/X/V) lives there too: `set_clipboard` /
+  `read_clipboard`, with `text/uri-list` plus GNOME's and KDE's cut markers.
+  egui-winit turns Ctrl+C/X/V into `Event::Copy/Cut/Paste` instead of key
+  events (handled in `handle_keys`), and only reports Paste when the clipboard
+  holds text, so Ctrl+V is also caught on our own `wl_keyboard`; `paste_files`
+  ignores the second of the two.
 - UI tests run egui frames headlessly with synthetic pointer events
   (`ui.rs` tests); use that for mouse behaviour rather than a real window.
 - Tests use temporary folders named `duopane-<what>-<pid>` and remove them.

@@ -1,4 +1,4 @@
-//! Drag and drop with other apps, on Wayland.
+//! Drag and drop, and copying files through the clipboard, with other apps on Wayland.
 //!
 //! winit (under eframe) can neither start a drag that leaves the window nor
 //! receive files dropped on it under Wayland, so this does both directly with the
@@ -23,6 +23,14 @@
 //! switches the drag to "move" (`set_move`) so the desktop's pointer shows it.
 //! Drags from other apps are only ever accepted as copies, so no app deletes its
 //! originals expecting us to have moved them.
+//!
+//! **The clipboard.** egui's clipboard only carries text, so files copied with
+//! Ctrl+C / Ctrl+X go on the clipboard here, the way file managers put them there:
+//! as file links, with GNOME's and KDE's "copy or cut" markers, and as plain paths.
+//! Wayland only lets an app set the clipboard right after a key press or click,
+//! so the seat's keyboard is bound too, for those serials. It also watches for
+//! Ctrl+V: egui only reports a paste when the clipboard holds text, and files
+//! copied in Dolphin come without any.
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::io::{Read, Write};
@@ -34,6 +42,7 @@ use wayland_client::protocol::wl_data_device::{self, WlDataDevice};
 use wayland_client::protocol::wl_data_device_manager::{DndAction, WlDataDeviceManager};
 use wayland_client::protocol::wl_data_offer::{self, WlDataOffer};
 use wayland_client::protocol::wl_data_source::{self, WlDataSource};
+use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_seat::{self, WlSeat};
@@ -81,6 +90,28 @@ struct Shared {
     own_offer: Option<WlDataOffer>,
     /// Shift is held: a drop on our window moves.
     moving: bool,
+    /// The serial of the latest key press or click (needed to set the clipboard).
+    last_input: Option<u32>,
+    /// What's on the clipboard from another app (or from us), when anything is.
+    selection: Option<WlDataOffer>,
+    /// Files we've put on the clipboard, while it's still ours: (paths, cut).
+    own_clip: Option<(Vec<PathBuf>, bool)>,
+    /// Keyboard modifier state: Control held (and nothing but Control).
+    ctrl_only: bool,
+}
+
+/// Files on the clipboard, and whether they were cut (to be moved) or copied.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clip {
+    pub paths: Vec<PathBuf>,
+    pub cut: bool,
+}
+
+/// Which of our data sources an event is for.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SourceKind {
+    Drag,
+    Clipboard,
 }
 
 /// The drag currently over our window.
@@ -97,8 +128,11 @@ struct State {
     qh: QueueHandle<State>,
     conn: Connection,
     pointer: Option<WlPointer>,
+    keyboard: Option<WlKeyboard>,
     hovering: Option<Hovering>,
     tx: mpsc::Sender<DragEvent>,
+    /// Ctrl+V seen on our keyboard.
+    paste_tx: mpsc::Sender<()>,
     ctx: eframe::egui::Context,
 }
 
@@ -118,6 +152,7 @@ pub struct NativeDrag {
     surface: WlSurface,
     shared: Arc<Mutex<Shared>>,
     rx: mpsc::Receiver<DragEvent>,
+    paste_rx: mpsc::Receiver<()>,
 }
 
 impl NativeDrag {
@@ -139,17 +174,27 @@ impl NativeDrag {
         let device = manager.get_data_device(&seat, &qh, ());
         let shared = Arc::new(Mutex::new(Shared::default()));
         let (tx, rx) = mpsc::channel();
-        let mut state =
-            State { shared: shared.clone(), qh: qh.clone(), conn: conn.clone(), pointer: None, hovering: None, tx, ctx };
+        let (paste_tx, paste_rx) = mpsc::channel();
+        let mut state = State {
+            shared: shared.clone(),
+            qh: qh.clone(),
+            conn: conn.clone(),
+            pointer: None,
+            keyboard: None,
+            hovering: None,
+            tx,
+            paste_tx,
+            ctx,
+        };
         // Learn the seat's capabilities (and so get a pointer) before going on.
         queue.roundtrip(&mut state).ok()?;
-        debug!("ready: data device manager v{}, pointer: {}", manager.version(), state.pointer.is_some());
+        debug!("ready: data device manager v{}, pointer: {}, keyboard: {}", manager.version(), state.pointer.is_some(), state.keyboard.is_some());
 
         std::thread::Builder::new()
             .name("wayland-drag".into())
             .spawn(move || while queue.blocking_dispatch(&mut state).is_ok() {})
             .ok()?;
-        Some(NativeDrag { conn, qh, manager, device, surface, shared, rx })
+        Some(NativeDrag { conn, qh, manager, device, surface, shared, rx, paste_rx })
     }
 
     /// True while a mouse button is held over the window (a drag can start).
@@ -166,7 +211,7 @@ impl NativeDrag {
         shared.plain = paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n");
         shared.ours = true;
         drop(shared);
-        let source = self.manager.create_data_source(&self.qh, ());
+        let source = self.manager.create_data_source(&self.qh, SourceKind::Drag);
         source.offer(URI_LIST.into());
         source.offer("text/plain;charset=utf-8".into());
         source.offer("text/plain".into());
@@ -192,6 +237,82 @@ impl NativeDrag {
         }
     }
 
+    /// Puts files on the clipboard (to be moved when `cut`). Returns false when it
+    /// can't (no key press or click seen yet).
+    pub fn set_clipboard(&self, paths: &[PathBuf], cut: bool) -> bool {
+        let Ok(mut s) = self.shared.lock() else { return false };
+        let Some(serial) = s.last_input else { return false };
+        s.own_clip = Some((paths.to_vec(), cut));
+        drop(s);
+        let source = self.manager.create_data_source(&self.qh, SourceKind::Clipboard);
+        for mime in [URI_LIST, GNOME_FILES, KDE_CUT, "text/plain;charset=utf-8", "text/plain", "UTF8_STRING"] {
+            source.offer(mime.into());
+        }
+        self.device.set_selection(Some(&source), serial);
+        debug!("clipboard set with serial {serial}: {} file(s), cut: {cut}", paths.len());
+        self.conn.flush().is_ok()
+    }
+
+    /// Starts reading files from the clipboard. The answer arrives on the
+    /// returned channel: the files, or `None` when the clipboard holds no files.
+    pub fn read_clipboard(&self) -> mpsc::Receiver<Option<Clip>> {
+        let (tx, rx) = mpsc::channel();
+        let Ok(s) = self.shared.lock() else {
+            let _ = tx.send(None);
+            return rx;
+        };
+        // Our own files: no need to go round the compositor.
+        if let Some((paths, cut)) = &s.own_clip {
+            let _ = tx.send(Some(Clip { paths: paths.clone(), cut: *cut }));
+            return rx;
+        }
+        let Some(offer) = s.selection.clone().filter(|o| offer_has(o, URI_LIST)) else {
+            let _ = tx.send(None);
+            return rx;
+        };
+        drop(s);
+        // Ask for each format before reading any: the other app answers them in turn.
+        let list = receive(&offer, URI_LIST);
+        let marker = if offer_has(&offer, KDE_CUT) {
+            receive(&offer, KDE_CUT).map(|r| (KDE_CUT, r))
+        } else if offer_has(&offer, GNOME_FILES) {
+            receive(&offer, GNOME_FILES).map(|r| (GNOME_FILES, r))
+        } else {
+            None
+        };
+        let _ = self.conn.flush();
+        std::thread::spawn(move || {
+            let read = |mut r: std::io::PipeReader| {
+                let mut s = String::new();
+                let _ = r.read_to_string(&mut s);
+                s
+            };
+            let paths = list.map(read).map(|t| parse_uri_list(&t)).unwrap_or_default();
+            let cut = match marker {
+                Some((KDE_CUT, r)) => read(r).trim() == "1",
+                Some((_, r)) => read(r).lines().next() == Some("cut"),
+                None => false,
+            };
+            debug!("clipboard read: {} file(s), cut: {cut}", paths.len());
+            let _ = tx.send((!paths.is_empty()).then_some(Clip { paths, cut }));
+        });
+        rx
+    }
+
+    /// Our cut files have been moved: the clipboard no longer offers them.
+    pub fn forget_cut(&self) {
+        if let Ok(mut s) = self.shared.lock() {
+            if s.own_clip.as_ref().is_some_and(|(_, cut)| *cut) {
+                s.own_clip = None;
+            }
+        }
+    }
+
+    /// True if Ctrl+V was pressed since last asked (see the module notes).
+    pub fn paste_pressed(&self) -> bool {
+        self.paste_rx.try_iter().count() > 0
+    }
+
     /// What happened since last asked.
     pub fn events(&self) -> Vec<DragEvent> {
         self.rx.try_iter().collect()
@@ -200,6 +321,18 @@ impl NativeDrag {
 
 fn preferred(moving: bool) -> DndAction {
     if moving { DndAction::Move } else { DndAction::Copy }
+}
+
+/// GNOME's (and many others') list of copied files: "copy" or "cut", then one link a line.
+const GNOME_FILES: &str = "x-special/gnome-copied-files";
+/// KDE's cut marker: "1" when the files were cut, "0" when copied.
+const KDE_CUT: &str = "application/x-kde-cutselection";
+
+/// Asks the other app for one format of what it offers; it's read from the pipe.
+fn receive(offer: &WlDataOffer, mime: &str) -> Option<std::io::PipeReader> {
+    let (reader, writer) = std::io::pipe().ok()?;
+    offer.receive(mime.into(), std::os::fd::AsFd::as_fd(&writer));
+    Some(reader) // `writer` closes here; the request carries its own copy
 }
 
 /// "/a b/c.txt" -> "file:///a%20b/c.txt"
@@ -256,12 +389,43 @@ impl Dispatch<WlDataDeviceManager, ()> for State {
 
 impl Dispatch<WlSeat, ()> for State {
     fn event(state: &mut Self, seat: &WlSeat, event: wl_seat::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
-        // Asking for a pointer on a seat that has none is a protocol error (which
-        // would end the whole window's connection), so wait until it says it has one.
+        // Asking for a pointer or keyboard on a seat that has none is a protocol
+        // error (which would end the whole window's connection), so wait until it
+        // says it has one.
         if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(caps) } = event {
             if caps.contains(wl_seat::Capability::Pointer) && state.pointer.is_none() {
                 state.pointer = Some(seat.get_pointer(&state.qh, ()));
             }
+            if caps.contains(wl_seat::Capability::Keyboard) && state.keyboard.is_none() {
+                state.keyboard = Some(seat.get_keyboard(&state.qh, ()));
+            }
+        }
+    }
+}
+
+/// The key code of V (Linux input codes, before any keyboard layout).
+const KEY_V: u32 = 47;
+/// The usual place of Control and of the other modifiers in an xkb modifier mask
+/// (Shift 0, Lock 1, Control 2, Mod1 = Alt 3, Mod4 = Super 6).
+const MASK_CONTROL: u32 = 1 << 2;
+const MASK_OTHERS: u32 = (1 << 0) | (1 << 3) | (1 << 6);
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(state: &mut Self, _: &WlKeyboard, event: wl_keyboard::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        let Ok(mut shared) = state.shared.lock() else { return };
+        match event {
+            wl_keyboard::Event::Key { serial, key, state: WEnum::Value(wl_keyboard::KeyState::Pressed), .. } => {
+                shared.last_input = Some(serial);
+                if key == KEY_V && shared.ctrl_only {
+                    drop(shared);
+                    let _ = state.paste_tx.send(());
+                    state.ctx.request_repaint();
+                }
+            }
+            wl_keyboard::Event::Modifiers { mods_depressed, .. } => {
+                shared.ctrl_only = mods_depressed & MASK_CONTROL != 0 && mods_depressed & MASK_OTHERS == 0;
+            }
+            _ => {}
         }
     }
 }
@@ -272,6 +436,7 @@ impl Dispatch<WlPointer, ()> for State {
         match event {
             wl_pointer::Event::Button { serial, state: WEnum::Value(wl_pointer::ButtonState::Pressed), .. } => {
                 shared.press = Some(serial);
+                shared.last_input = Some(serial);
                 debug!("press, serial {serial}");
             }
             wl_pointer::Event::Button { .. } => shared.press = None,
@@ -342,8 +507,14 @@ impl Dispatch<WlDataDevice, ()> for State {
                     h.offer.destroy();
                 }
             }
-            // The clipboard's contents: not used here.
-            wl_data_device::Event::Selection { id: Some(offer) } => offer.destroy(),
+            // What's on the clipboard now (kept to read files from on Ctrl+V).
+            wl_data_device::Event::Selection { id } => {
+                if let Ok(mut s) = state.shared.lock() {
+                    if let Some(old) = std::mem::replace(&mut s.selection, id) {
+                        old.destroy();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -398,8 +569,11 @@ impl Dispatch<WlDataOffer, Mutex<Vec<String>>> for State {
     }
 }
 
-impl Dispatch<WlDataSource, ()> for State {
-    fn event(state: &mut Self, source: &WlDataSource, event: wl_data_source::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+impl Dispatch<WlDataSource, SourceKind> for State {
+    fn event(state: &mut Self, source: &WlDataSource, event: wl_data_source::Event, kind: &SourceKind, _: &Connection, _: &QueueHandle<Self>) {
+        if *kind == SourceKind::Clipboard {
+            return clipboard_source_event(state, source, event);
+        }
         match event {
             // The app the files were dropped on asks for them in one of our formats.
             wl_data_source::Event::Send { mime_type, fd } => {
@@ -422,10 +596,56 @@ impl Dispatch<WlDataSource, ()> for State {
     }
 }
 
+/// Our files on the clipboard: another app asks for them, or something else
+/// took the clipboard (Cancelled).
+fn clipboard_source_event(state: &mut State, source: &WlDataSource, event: wl_data_source::Event) {
+    match event {
+        wl_data_source::Event::Send { mime_type, fd } => {
+            let Ok(s) = state.shared.lock() else { return };
+            let Some((paths, cut)) = &s.own_clip else { return };
+            debug!("clipboard asked for {mime_type}");
+            let text = clipboard_text(&mime_type, paths, *cut);
+            drop(s);
+            let _ = std::fs::File::from(fd).write_all(text.as_bytes());
+        }
+        wl_data_source::Event::Cancelled => {
+            debug!("clipboard taken by something else");
+            if let Ok(mut s) = state.shared.lock() {
+                s.own_clip = None;
+            }
+            source.destroy();
+        }
+        _ => {}
+    }
+}
+
+/// Our clipboard files in the format asked for.
+fn clipboard_text(mime: &str, paths: &[PathBuf], cut: bool) -> String {
+    let uris = || paths.iter().map(|p| file_uri(p)).collect::<Vec<_>>();
+    match mime {
+        URI_LIST => uris().iter().map(|u| format!("{u}\r\n")).collect(),
+        GNOME_FILES => std::iter::once(if cut { "cut" } else { "copy" }.to_string()).chain(uris()).collect::<Vec<_>>().join("\n"),
+        KDE_CUT => if cut { "1" } else { "0" }.into(),
+        _ => paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn clipboard_formats() {
+        let paths = vec![PathBuf::from("/home/me/a b.txt"), PathBuf::from("/tmp/c")];
+        assert_eq!(clipboard_text(URI_LIST, &paths, false), "file:///home/me/a%20b.txt\r\nfile:///tmp/c\r\n");
+        assert_eq!(clipboard_text(GNOME_FILES, &paths, true), "cut\nfile:///home/me/a%20b.txt\nfile:///tmp/c");
+        assert_eq!(clipboard_text(GNOME_FILES, &paths, false).lines().next(), Some("copy"));
+        assert_eq!((clipboard_text(KDE_CUT, &paths, true), clipboard_text(KDE_CUT, &paths, false)), ("1".into(), "0".into()));
+        assert_eq!(clipboard_text("text/plain", &paths, false), "/home/me/a b.txt\n/tmp/c");
+        // What we put there reads back as the same files.
+        assert_eq!(parse_uri_list(&clipboard_text(URI_LIST, &paths, false)), paths);
+    }
 
     #[test]
     fn uris_both_ways() {

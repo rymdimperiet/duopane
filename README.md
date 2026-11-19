@@ -64,8 +64,11 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Tab | Switch to the other pane |
 | Ctrl+P | **Go to** a folder: type part of its name, or a path like `~/Doc` (Tab completes) |
 | Ctrl+Shift+P | **Command palette**: every command, searchable |
+| Ctrl+F or Alt+F7 | **Find files** by name (see below) |
+| Ctrl+Q | **Quick view**: details of the item under the cursor in the other pane (Ctrl+Q again or Tab closes it) |
 | F5 / F6 | Copy / move to the other pane (you can edit the destination) |
-| F2 or Shift+F6 | Rename |
+| Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut files, and paste them into the folder in the active pane (also to and from other apps; see below) |
+| F2 or Shift+F6 | Rename (with several files selected: batch rename) |
 | Alt+F5 | **Pack** (compress) the selection into a ZIP, TAR.GZ or TAR archive |
 | Alt+F9 | **Unpack** the selected archives |
 | Ctrl+M | **Batch rename** the selection (or the whole folder) |
@@ -89,6 +92,8 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Ctrl+Plus / Ctrl+Minus | Bigger / smaller text |
 | Ctrl+, | Edit the settings file |
 | F12 | **Appearance**: colour scheme, fonts, text size, striped rows, the “..” row |
+| F1 / Shift+F1 | Keyboard shortcuts / About Duopane |
+| F10 | Quit |
 | F1 | List every shortcut |
 
 Hold Alt, Shift or Ctrl to see what the F-keys do with that key in the bar at
@@ -117,6 +122,20 @@ right-click opens a menu, and clicking a column header sorts by it.
 - **In from other apps:** drop files on a pane and the Copy dialog opens with
   that pane's folder filled in. This works on Wayland and X11.
 
+### Copy and paste
+
+Ctrl+C (or Ctrl+X to cut) puts the selected files on the clipboard; Ctrl+V in
+any folder copies them there (or moves them, after a cut), with the usual
+questions when something's already there. Pasting into the folder they came
+from makes copies ("name copy.txt").
+
+On Wayland the files go on the system clipboard the way file managers put them
+there, so they paste into Dolphin, Files, a browser's upload box or mail, and
+files copied or cut in those paste into Duopane. A file manager that pastes cut
+files moves them itself; Duopane never deletes anything because another app said
+so. Elsewhere the paths go on the clipboard as text, and Ctrl+V works within
+Duopane.
+
 Copies and moves run in the background with a progress bar; you can cancel them
 and start more (they queue up).
 
@@ -129,6 +148,44 @@ existing files. The "All" choices apply to the rest of that job. The keyboard
 focus starts on Skip, so a stray Enter never overwrites anything. Folders that
 meet are merged, and you're asked about each file inside. The same applies to
 unpacking archives and copying files out of them.
+
+## Finding files (Ctrl+F)
+
+Type a few words and results appear as they're found. Every word has to appear
+in the name or the path below the folder you're in, in any order, upper or lower
+case; no regular expressions needed. `holiday jpg` finds
+`Pictures/Holiday 2026/IMG_4411.jpg`. Names that match best come first.
+
+- **Tab** widens the search: this folder → your home folder → everywhere.
+- **Enter** goes to the selected file: its folder opens with the cursor on it.
+- **Ctrl+Enter** (or ↓ past the last result to the buttons, then Enter on *Show
+  all in the pane*) shows all results in the pane, like a folder ("feed to listbox"):
+  select, copy, move, delete, view or rename them as usual. The path bar says
+  what was searched; Backspace or `..` goes back to the folder.
+- A few filters, each starting with a symbol so they never clash with names:
+  `*.pdf` (a mask), `>10mb` and `<1kb` (size), `@today`, `@yesterday`, `@week`,
+  `@month`, `@2025`, `@2025-11` (when it was changed), `@folders`, `@files`.
+
+When [plocate](https://plocate.sesse.net/) is installed (most distributions have
+it), its index gives results in a moment, while Duopane also looks through the
+folder itself for anything newer than the index. "Everywhere" uses the index
+alone and says how old it is. Hidden files are searched when they're shown
+(Ctrl+.).
+
+## Quick view (Ctrl+Q)
+
+The other pane shows what the cursor is on, and follows it as you move:
+
+- **Everything:** kind, location, size in bytes, modified / created / accessed,
+  permissions and owner (and where a link points).
+- **Folders:** what's in them, and their total size, counted as you watch.
+- **Photos:** a preview, the size in pixels, and the camera's details (camera,
+  lens, date taken, exposure, aperture, ISO, focal length, location).
+- **Music and video:** length, format, tags (title, artist, album…), and the
+  cover or a frame from the video (needs ffmpeg).
+- **PDFs:** pages, title, author, paper size (needs poppler).
+- **Archives:** how many files are inside and their unpacked size.
+- **Text:** the first lines.
 
 ## Archives as folders
 
@@ -278,8 +335,8 @@ test suite, but expect rough edges, and please report them.
 - **Desktops:** developed on KDE Plasma (Wayland). X11 and other desktops should
   work but are less tested. On X11, dragging files to other apps goes through
   ripdrag or dragon-drop.
-- **Not there yet:** tabs, searching for files in subfolders, remote locations
-  (SFTP and the like, beyond what's mounted), and a side-by-side file comparison.
+- **Not there yet:** tabs, searching inside files, remote locations (SFTP and
+  the like, beyond what's mounted), and a side-by-side file comparison.
 - **The viewer leans on other tools** for some files: poppler for PDFs, ffmpeg for video.
 - Variable fonts only offer their default weight.
 

@@ -81,6 +81,30 @@ impl App {
         false
     }
 
+    /// Commands that need one real folder say so while search results are shown.
+    fn refuse_in_results(&mut self, what: &str) -> bool {
+        if self.panes[self.active].results.is_some() {
+            self.set_status(format!("{what} isn't possible in search results; go to a folder first (Backspace)"), true);
+            return true;
+        }
+        false
+    }
+
+    /// Ctrl+F: find files below the folder in the active pane.
+    pub fn open_search(&mut self) {
+        let folder = self.panes[self.active].real_dir();
+        let d = crate::search_ui::SearchDialog::new(folder, &self.last_search, self.settings.show_hidden);
+        self.modal = Some(Modal::Search(d));
+    }
+
+    /// Shows `path` in its folder, with the cursor on it.
+    pub(crate) fn jump_to(&mut self, path: &Path) {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
+        let name = name.to_string_lossy().into_owned();
+        self.navigate(self.active, dir);
+        self.panes[self.active].set_cursor_to_name(&name);
+    }
+
     fn refuse_other_in_archive(&mut self) -> bool {
         if self.panes[self.other()].archive.is_some() {
             self.set_status("The other pane is inside an archive; files can't be put into an archive that way yet", true);
@@ -189,7 +213,7 @@ impl App {
 
     /// Ctrl+M: rename many files at once with patterns.
     pub fn ask_batch_rename(&mut self) {
-        if self.refuse_in_archive("Renaming") {
+        if self.refuse_in_archive("Renaming") || self.refuse_in_results("Batch rename") {
             return;
         }
         let pane = &self.panes[self.active];
@@ -398,6 +422,75 @@ impl App {
         self.set_status(format!("Copied {} to the clipboard", plural(targets.len(), "path")), false);
     }
 
+    /// Ctrl+C / Ctrl+X: puts the selected files on the clipboard; Ctrl+V copies
+    /// them (or, after Ctrl+X, moves them) into the folder in the active pane.
+    /// On Wayland they go on the system clipboard as files, so they can be pasted
+    /// into other apps too; elsewhere their paths go on it as text.
+    pub fn clip_files(&mut self, ctx: &egui::Context, cut: bool) {
+        if self.panes[self.active].archive.is_some() {
+            return self.set_status("Files inside an archive can't go on the clipboard yet; copy them out first (F5)", true);
+        }
+        let paths = self.panes[self.active].targets();
+        if paths.is_empty() {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        let as_files = self.native_drag.as_ref().is_some_and(|nd| nd.set_clipboard(&paths, cut));
+        #[cfg(not(target_os = "linux"))]
+        let as_files = false;
+        if !as_files {
+            ctx.copy_text(paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"));
+        }
+        let what = describe(&paths);
+        let them = if paths.len() == 1 { "it" } else { "them" };
+        self.clip = Some(crate::app::Clip { paths, cut });
+        let msg = if cut { format!("Cut {what}: Ctrl+V moves {them} here") } else { format!("Copied {what}: Ctrl+V pastes {them}") };
+        self.set_status(msg, false);
+    }
+
+    /// Ctrl+V: pastes files from the clipboard into the folder in the active pane.
+    pub fn paste_files(&mut self) {
+        // The same Ctrl+V can be reported twice (by egui and by the Wayland
+        // keyboard); one paste is enough.
+        if self.last_paste.elapsed() < std::time::Duration::from_millis(400) {
+            return;
+        }
+        self.last_paste = std::time::Instant::now();
+        if self.refuse_in_archive("Pasting") || self.refuse_in_results("Pasting") {
+            return;
+        }
+        let dest = self.panes[self.active].real_dir();
+        // On Wayland, read the system clipboard (files copied in other apps too);
+        // the answer is picked up in `poll_background`.
+        #[cfg(target_os = "linux")]
+        if let Some(nd) = &self.native_drag {
+            self.paste_rx = Some((dest, nd.read_clipboard()));
+            return;
+        }
+        match self.clip.clone() {
+            Some(c) => self.paste_into(c, &dest),
+            None => self.set_status("Nothing to paste: copy files with Ctrl+C first", true),
+        }
+    }
+
+    /// Copies (or moves, when cut) clipboard files into `dest`, through the usual
+    /// copy / move job (with its questions when something's already there).
+    pub(crate) fn paste_into(&mut self, clip: crate::app::Clip, dest: &Path) {
+        let paths: Vec<PathBuf> = clip.paths.into_iter().filter(|p| p.symlink_metadata().is_ok()).collect();
+        if paths.is_empty() {
+            return self.set_status("The files on the clipboard are gone", true);
+        }
+        if clip.cut {
+            // Moved once; the clipboard no longer offers them.
+            self.clip = None;
+            #[cfg(target_os = "linux")]
+            if let Some(nd) = &self.native_drag {
+                nd.forget_cut();
+            }
+        }
+        self.prepare_transfer(clip.cut, paths, &dest.to_string_lossy());
+    }
+
     pub fn add_bookmark(&mut self) {
         let p = self.panes[self.active].path.clone();
         if !self.settings.bookmarks.contains(&p) {
@@ -506,25 +599,33 @@ impl App {
         if self.refuse_in_archive("Renaming") {
             return;
         }
+        // With several files selected, rename them all at once (not in search
+        // results: batch rename works on one folder).
+        let pane = &self.panes[self.active];
+        if pane.selected.len() > 1 && pane.results.is_none() {
+            return self.ask_batch_rename();
+        }
         let Some(e) = self.panes[self.active].cursor_entry().cloned().filter(|e| !e.is_up()) else { return };
+        // The file's own name (in search results, entries are named by their path).
+        let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(e.name);
         // Pre-select the name without its extension.
-        let stem_len = match e.name.rfind('.') {
-            Some(i) if i > 0 && !e.is_dir => e.name[..i].chars().count(),
-            _ => e.name.chars().count(),
+        let stem_len = match name.rfind('.') {
+            Some(i) if i > 0 && !e.is_dir => name[..i].chars().count(),
+            _ => name.chars().count(),
         };
-        let title = format!("Rename “{}” to:", e.name);
-        self.ask(title, "New name", e.name.clone(), InputPurpose::Rename(e.path), Some(stem_len));
+        let title = format!("Rename “{name}” to:");
+        self.ask(title, "New name", name, InputPurpose::Rename(e.path), Some(stem_len));
     }
 
     pub fn ask_new_folder(&mut self) {
-        if self.refuse_in_archive("Making a folder") {
+        if self.refuse_in_archive("Making a folder") || self.refuse_in_results("Making a folder") {
             return;
         }
         self.ask("New folder".into(), "Folder name (a/b/c makes nested folders)", String::new(), InputPurpose::NewFolder, None);
     }
 
     pub fn ask_new_file(&mut self) {
-        if self.refuse_in_archive("Making a file") {
+        if self.refuse_in_archive("Making a file") || self.refuse_in_results("Making a file") {
             return;
         }
         self.ask("New file".into(), "File name", String::new(), InputPurpose::NewFile, None);
@@ -582,6 +683,7 @@ impl App {
             title: title.into(),
             message,
             buttons: vec![(button.into(), Some(spec)), ("Cancel".into(), None)],
+            focus: 0,
         });
     }
 
@@ -846,9 +948,13 @@ impl App {
         }
         match std::fs::rename(from, &to) {
             Ok(()) => {
+                for p in &mut self.panes {
+                    p.renamed(from, &to); // keeps it in search results under its new name
+                }
                 let p = &mut self.panes[self.active];
                 p.reload();
-                p.set_cursor_to_name(text);
+                let shown = p.results.as_ref().and_then(|r| to.strip_prefix(&r.root).ok()).map(|r| r.to_string_lossy().into_owned());
+                p.set_cursor_to_name(shown.as_deref().unwrap_or(text));
                 let other = self.other();
                 self.panes[other].reload();
             }

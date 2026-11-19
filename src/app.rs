@@ -40,7 +40,8 @@ pub enum InputPurpose {
 
 pub enum Modal {
     Input { title: String, hint: String, text: String, purpose: InputPurpose, select_chars: Option<usize>, first: bool },
-    Confirm { title: String, message: String, buttons: Vec<(String, Option<JobSpec>)> },
+    /// A question with buttons; `focus` is the one Enter presses (arrows / Tab move it).
+    Confirm { title: String, message: String, buttons: Vec<(String, Option<JobSpec>)>, focus: usize },
     Palette(crate::dialogs::PaletteState),
     Message { title: String, text: String },
     /// Colour scheme and fonts.
@@ -67,6 +68,17 @@ pub enum Modal {
     Unpack { archives: Vec<PathBuf>, dest: String, into_folder: bool, first: bool },
     /// A running job found a file already where it's going.
     Conflict(crate::dialogs::ConflictDialog),
+    /// Find files (Ctrl+F).
+    Search(crate::search_ui::SearchDialog),
+    /// About Duopane (Shift+F1).
+    About,
+}
+
+/// Files on Duopane's clipboard, and whether they were cut (to be moved).
+#[derive(Clone, Debug)]
+pub struct Clip {
+    pub paths: Vec<PathBuf>,
+    pub cut: bool,
 }
 
 pub struct Status {
@@ -101,7 +113,21 @@ pub struct App {
     pub(crate) panes_rect: Option<egui::Rect>,
     /// Drags out of the window into other apps (Wayland only; see `native_drag.rs`).
     #[cfg(target_os = "linux")]
-    native_drag: Option<crate::native_drag::NativeDrag>,
+    pub(crate) native_drag: Option<crate::native_drag::NativeDrag>,
+    /// Files copied or cut with Ctrl+C / Ctrl+X (also put on the system clipboard
+    /// where possible; this copy serves pasting where it isn't).
+    pub(crate) clip: Option<Clip>,
+    /// A paste waiting for the clipboard's contents: (destination folder, answer).
+    #[cfg(target_os = "linux")]
+    pub(crate) paste_rx: Option<(PathBuf, mpsc::Receiver<Option<crate::native_drag::Clip>>)>,
+    /// When the last paste started (Ctrl+V can be reported twice; see `paste_files`).
+    pub(crate) last_paste: Instant,
+    /// Quick view (Ctrl+Q): shown in place of one pane, following the other's cursor.
+    pub(crate) quick_view: Option<crate::quickview::QuickView>,
+    /// Tab presses kept from egui's own focus handling (see `raw_input_hook`).
+    held_keys: Vec<Event>,
+    /// What was last searched for (Ctrl+F starts with it).
+    pub(crate) last_search: String,
     /// A drag of ours is in the desktop's hands (see `hand_drag_to_desktop`).
     native_dragging: bool,
     /// Files from another app are being dragged over the window.
@@ -153,6 +179,13 @@ impl App {
             panes_rect: None,
             #[cfg(target_os = "linux")]
             native_drag: native_drag(cc),
+            held_keys: Vec::new(),
+            last_search: String::new(),
+            quick_view: None,
+            clip: None,
+            #[cfg(target_os = "linux")]
+            paste_rx: None,
+            last_paste: Instant::now() - Duration::from_secs(10),
             native_dragging: false,
             foreign_hover: false,
         };
@@ -326,6 +359,17 @@ impl App {
                 self.modal = Some(Modal::Conflict(crate::dialogs::ConflictDialog::new(q)));
             }
         }
+        #[cfg(target_os = "linux")]
+        if let Some((dest, rx)) = &self.paste_rx {
+            if let Ok(clip) = rx.try_recv() {
+                let dest = dest.clone();
+                self.paste_rx = None;
+                match clip {
+                    Some(c) => self.paste_into(Clip { paths: c.paths, cut: c.cut }, &dest),
+                    None => self.set_status("There are no files on the clipboard", true),
+                }
+            }
+        }
         if let Some(rx) = &self.size_rx {
             if let Ok((n, bytes)) = rx.try_recv() {
                 self.size_rx = None;
@@ -350,6 +394,21 @@ impl App {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Ctrl+V seen on the Wayland keyboard (egui misses it when the clipboard
+        // holds files but no text). Taken every frame so none is left for later.
+        #[cfg(target_os = "linux")]
+        let native_paste = self.native_drag.as_ref().is_some_and(|nd| nd.paste_pressed());
+        #[cfg(not(target_os = "linux"))]
+        let native_paste = false;
+        // Tab, kept from egui's focus handling (see `raw_input_hook`).
+        let held = std::mem::take(&mut self.held_keys);
+        if !held.is_empty() {
+            ctx.input_mut(|i| {
+                for (k, e) in held.into_iter().enumerate() {
+                    i.events.insert(k, e);
+                }
+            });
+        }
         let editing = self.panes.iter().any(|p| p.editing_path.is_some());
         if self.modal.is_some() || editing {
             return;
@@ -404,6 +463,10 @@ impl App {
                         }
                     }
                 }
+                // egui reports Ctrl+C / X / V as these rather than as keys.
+                Event::Copy => self.run_id(ctx, "clip_copy"),
+                Event::Cut => self.run_id(ctx, "clip_cut"),
+                Event::Paste(_) => self.run_id(ctx, "clip_paste"),
                 Event::Text(t) => {
                     if std::mem::take(&mut skip_text) {
                         continue;
@@ -430,10 +493,13 @@ impl App {
                 _ => {}
             }
         }
+        if native_paste && self.modal.is_none() {
+            self.run_id(ctx, "clip_paste");
+        }
         // Don't let scroll areas or buttons react to the keys handled here.
         ctx.input_mut(|i| {
             let rest = i.events.split_off(consumed.min(i.events.len()));
-            i.events.retain(|e| !matches!(e, Event::Key { .. } | Event::Text(_)));
+            i.events.retain(|e| !matches!(e, Event::Key { .. } | Event::Text(_) | Event::Copy | Event::Cut | Event::Paste(_)));
             i.events.extend(rest);
         });
     }
@@ -523,6 +589,31 @@ impl App {
         let _ = ctx;
     }
 
+    /// Ctrl+Q: shows details of what the cursor is on in the other pane (or stops).
+    pub(crate) fn toggle_quick_view(&mut self) {
+        self.quick_view = match self.quick_view {
+            Some(_) => None,
+            None => Some(crate::quickview::QuickView::new(self.other())),
+        };
+    }
+
+    /// Keeps Quick View on the cursor of the pane it watches. Moving into the pane
+    /// it covers (Tab, a click) closes it.
+    fn follow_quick_view(&mut self, ctx: &egui::Context) {
+        use crate::quickview::Target;
+        let Some(qv) = &mut self.quick_view else { return };
+        if qv.slot == self.active {
+            self.quick_view = None;
+            return;
+        }
+        let pane = &self.panes[1 - qv.slot];
+        let target = pane.cursor_entry().map(|e| match &pane.archive {
+            Some(a) => Target::InArchive { archive: a.file.clone(), entry: e.clone() },
+            None => Target::Disk { path: e.path.clone(), up: e.is_up() },
+        });
+        qv.follow(target, ctx);
+    }
+
     /// Files dropped onto the window from another app go to the pane they were
     /// dropped on (or the active pane when the position isn't known).
     /// Only some systems deliver these; see the README.
@@ -566,6 +657,15 @@ impl eframe::App for App {
     /// drag's own events are turned into them here, so egui sees the drag move
     /// over the panes and be dropped (or end elsewhere) as if it were its own.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        // In the main window, Tab switches panes. egui would also move its keyboard
+        // focus to the first button on screen (F2 Rename) and flash a frame round
+        // it, so Tab is held back from egui here and handed to `handle_keys`.
+        let main_window = self.modal.is_none() && self.lister.is_none() && self.panes.iter().all(|p| p.editing_path.is_none());
+        if main_window {
+            let (tabs, rest) = std::mem::take(&mut raw.events).into_iter().partition(|e| matches!(e, Event::Key { key: Key::Tab, .. }));
+            raw.events = rest;
+            self.held_keys = tabs;
+        }
         #[cfg(target_os = "linux")]
         if let Some(nd) = &self.native_drag {
             nd.set_move(raw.modifiers.shift);
@@ -586,6 +686,7 @@ impl eframe::App for App {
         }
         self.handle_keys(ctx);
         self.files_dropped_in(ctx);
+        self.follow_quick_view(ctx);
         self.bottom_bar(ctx);
         self.panes_ui(ctx);
         self.modal_ui(ctx);
@@ -595,7 +696,10 @@ impl eframe::App for App {
         }
         self.update_title(ctx);
         self.save_if_dirty();
-        let busy = self.job.is_some() || self.size_rx.is_some() || self.panes.iter().any(Pane::is_loading);
+        let busy = self.job.is_some()
+            || self.size_rx.is_some()
+            || self.panes.iter().any(Pane::is_loading)
+            || self.quick_view.as_ref().is_some_and(|q| q.busy());
         ctx.request_repaint_after(Duration::from_millis(if busy { 100 } else { 1000 }));
     }
 }

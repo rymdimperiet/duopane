@@ -33,6 +33,8 @@ egui_commonmark = { version = "0.20", default-features = false, features = ["pul
 egui_extras = { version = "0.31", default-features = false, features = ["file", "image"] }
 # Appearance: list and load the fonts installed on the system
 fontdb = "0.23"
+ignore = "0.4"
+kamadak-exif = "0.6"
 
 # Dragging files out of the window into other apps on Wayland (see src/native_drag.rs).
 # All three already come with eframe/winit; these lines only let Duopane use them.

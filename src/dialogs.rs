@@ -112,7 +112,7 @@ pub fn dir_item(p: PathBuf, boost: i32) -> PaletteItem {
     PaletteItem { title, detail: tilde(&p), target: PaletteTarget::Dir(p), boost }
 }
 
-fn dialog<'a>(title: &str) -> egui::Window<'a> {
+pub(crate) fn dialog<'a>(title: &str) -> egui::Window<'a> {
     egui::Window::new(title.to_string())
         .id(egui::Id::new("modal_dialog"))
         .collapsible(false)
@@ -190,17 +190,28 @@ impl App {
                     });
                 });
             }
-            Modal::Confirm { title, message, buttons } => {
+            Modal::Confirm { title, message, buttons, focus } => {
                 let (enter, esc) = enter_esc(ctx);
-                let mut chosen: Option<usize> = if enter { Some(0) } else { None };
+                let n = buttons.len().max(1);
+                ctx.input_mut(|i| {
+                    if i.consume_key(Modifiers::NONE, Key::ArrowRight) || i.consume_key(Modifiers::NONE, Key::Tab) {
+                        *focus = (*focus + 1) % n;
+                    }
+                    if i.consume_key(Modifiers::NONE, Key::ArrowLeft) || i.consume_key(Modifiers::SHIFT, Key::Tab) {
+                        *focus = (*focus + n - 1) % n;
+                    }
+                });
+                let mut chosen: Option<usize> = if enter { Some(*focus) } else { None };
                 dialog(title).show(ctx, |ui| {
                     ui.set_width(440.0);
                     ui.label(message.as_str());
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         for (i, (label, _)) in buttons.iter().enumerate() {
-                            let b = if i == 0 {
-                                egui::Button::new(egui::RichText::new(label.as_str()).strong()).fill(theme::c().cursor)
+                            let b = if i == *focus {
+                                egui::Button::new(egui::RichText::new(label.as_str()).strong())
+                                    .fill(theme::c().cursor)
+                                    .stroke(egui::Stroke::new(1.0, theme::c().accent))
                             } else {
                                 egui::Button::new(label.as_str())
                             };
@@ -210,7 +221,7 @@ impl App {
                         }
                     });
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Enter picks the first button, Esc cancels").color(theme::c().dim).small());
+                    ui.label(egui::RichText::new("←/→ or Tab choose, Enter picks, Esc cancels").color(theme::c().dim).small());
                 });
                 if esc {
                     close = true;
@@ -218,6 +229,11 @@ impl App {
                     close = true;
                     start = buttons.get_mut(i).and_then(|(_, s)| s.take());
                 }
+            }
+            Modal::About => {
+                let (enter, esc) = enter_esc(ctx);
+                close = enter || esc;
+                close |= about_ui(ctx);
             }
             Modal::Message { title, text } => {
                 let (enter, esc) = enter_esc(ctx);
@@ -541,6 +557,24 @@ impl App {
                 if changed {
                     theme::apply(ctx, &self.settings);
                     self.dirty = true;
+                }
+            }
+            Modal::Search(d) => {
+                use crate::search_ui::SearchOutcome;
+                match d.ui(ctx) {
+                    None => {}
+                    Some(o) => {
+                        self.last_search = d.text.clone();
+                        close = true;
+                        match o {
+                            SearchOutcome::Jump(p) => self.jump_to(&p),
+                            SearchOutcome::Feed(set) => {
+                                let r = self.panes[self.active].show_results(set);
+                                self.after_move(self.active, r);
+                            }
+                            SearchOutcome::Close => {}
+                        }
+                    }
                 }
             }
             Modal::Palette(st) => {
@@ -963,6 +997,61 @@ fn palette_ui(ctx: &egui::Context, st: &mut PaletteState) -> (bool, Option<Palet
 }
 
 /// A searchable list of installed fonts. Returns true when the choice changed.
+/// Where the source lives (shown as a link in the About box).
+const REPOSITORY: &str = "https://github.com/rymdimperiet/duopane";
+
+/// The About box: icon, version, build details, credits. Returns true when closed.
+fn about_ui(ctx: &egui::Context) -> bool {
+    let th = theme::c();
+    let mut close = false;
+    egui::Window::new("About Duopane")
+        .id(egui::Id::new("modal_dialog"))
+        .collapsible(false)
+        .resizable(false)
+        .title_bar(false)
+        .order(egui::Order::Foreground)
+        .fade_in(false)
+        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.vertical_centered(|ui| {
+                ui.add_space(14.0);
+                ui.add(egui::Image::from_bytes("bytes://duopane-icon.png", include_bytes!("../packaging/duopane.png")).fit_to_exact_size(vec2(96.0, 96.0)));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Duopane").heading().strong().color(th.text));
+                ui.label(egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(th.text));
+                ui.label(egui::RichText::new("A keyboard-driven dual-pane file manager").color(th.dim));
+                ui.add_space(10.0);
+                for line in [
+                    format!("Commit {} · built {}", env!("DUOPANE_COMMIT"), env!("DUOPANE_BUILD_DATE")),
+                    format!("{} build for {}", env!("DUOPANE_PROFILE"), env!("DUOPANE_TARGET")),
+                    env!("DUOPANE_RUSTC").to_string(),
+                ] {
+                    ui.label(egui::RichText::new(line).small().color(th.dim));
+                }
+                ui.add_space(10.0);
+                if ui.link("Source code on GitHub").on_hover_text(REPOSITORY).clicked() {
+                    let _ = open::that_detached(REPOSITORY);
+                }
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("Coded with Opus 5.5 Medium").color(th.text));
+                ui.label(
+                    egui::RichText::new("Standing on the blue shoulders of John Socha's Norton Commander (1986).")
+                        .italics()
+                        .color(th.dim),
+                );
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("MIT licence").small().color(th.dim));
+                ui.add_space(12.0);
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+                ui.add_space(8.0);
+            });
+        });
+    close
+}
+
 /// The weight of a chosen font (Light, Regular, Bold…), from those installed.
 /// Hidden for the built-in font and for families with a single weight.
 fn weight_picker(ui: &mut egui::Ui, id: &str, family: &str, weight: &mut u16) -> bool {
@@ -1034,6 +1123,18 @@ mod tests {
             frame(vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
         }
         answer
+    }
+
+    #[test]
+    fn about_box() {
+        let date = env!("DUOPANE_BUILD_DATE");
+        assert!(date.len() == 10 && date.as_bytes()[4] == b'-' && date.as_bytes()[7] == b'-', "{date}");
+        eprintln!("about: {} | {} | {} | {} | {}", env!("DUOPANE_COMMIT"), date, env!("DUOPANE_PROFILE"), env!("DUOPANE_TARGET"), env!("DUOPANE_RUSTC"));
+        // It draws, and stays open until closed.
+        let ctx = egui::Context::default();
+        let mut closed = true;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| closed = about_ui(ctx));
+        assert!(!closed);
     }
 
     #[test]

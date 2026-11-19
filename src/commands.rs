@@ -38,6 +38,8 @@ pub fn builtin() -> Vec<Command> {
         cmd!("pack", "Pack files (compress)…", ["Alt+F5"], |a, _| a.ask_pack()),
         cmd!("unpack", "Unpack archive…", ["Alt+F9"], |a, _| a.ask_unpack()),
         cmd!("new_folder", "New folder…", ["F7"], |a, _| a.ask_new_folder()),
+        cmd!("search", "Find files…", ["Ctrl+F", "Alt+F7"], |a, _| a.open_search()),
+        cmd!("quick_view", "Quick view (details in the other pane)", ["Ctrl+Q"], |a, _| a.toggle_quick_view()),
         cmd!("new_file", "New file…", ["Shift+F4"], |a, _| a.ask_new_file()),
         cmd!("view", "View file (lister)", ["F3"], |a, _| a.view_file()),
         cmd!("edit", "Edit file", ["F4"], |a, _| a.edit_cursor()),
@@ -65,6 +67,9 @@ pub fn builtin() -> Vec<Command> {
         cmd!("swap_panes", "Swap the two panes", ["Ctrl+U"], |a, _| a.swap_panes()),
         cmd!("edit_path", "Type a location…", ["Ctrl+L"], |a, _| a.edit_path()),
         cmd!("copy_path", "Copy path to clipboard", ["Ctrl+Shift+C"], |a, ctx| a.copy_paths(ctx)),
+        cmd!("clip_copy", "Copy files to the clipboard", ["Ctrl+C"], |a, ctx| a.clip_files(ctx, false)),
+        cmd!("clip_cut", "Cut files to the clipboard (paste moves them)", ["Ctrl+X"], |a, ctx| a.clip_files(ctx, true)),
+        cmd!("clip_paste", "Paste files here", ["Ctrl+V"], |a, _| a.paste_files()),
         cmd!("drag_out", "Drag to another app…", [], |a, _| a.drag_out()),
         cmd!("open_terminal", "Open terminal here", ["F9"], |a, _| a.open_terminal()),
         cmd!("add_bookmark", "Bookmark this folder", ["Ctrl+B"], |a, _| a.add_bookmark()),
@@ -83,7 +88,9 @@ pub fn builtin() -> Vec<Command> {
         cmd!("font_smaller", "Make text smaller", ["Ctrl+Minus"], |a, ctx| a.change_font(ctx, -1.0)),
         cmd!("appearance", "Appearance: colour scheme and fonts…", ["F12"], |a, _| a.open_appearance()),
         cmd!("help", "Keyboard shortcuts", ["F1"], |a, _| a.show_help()),
-        cmd!("quit", "Quit", ["Ctrl+Q", "F10"], |_, ctx| ctx.send_viewport_cmd(egui::ViewportCommand::Close)),
+        // Not Alt+F1: many desktops (KDE Plasma among them) open their launcher with it.
+        cmd!("about", "About", ["Shift+F1"], |a, _| a.modal = Some(crate::app::Modal::About)),
+        cmd!("quit", "Quit", ["F10"], |_, ctx| ctx.send_viewport_cmd(egui::ViewportCommand::Close)),
     ]
 }
 
