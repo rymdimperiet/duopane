@@ -27,7 +27,7 @@ impl App {
                     self.modifier_key_bar(ui, m);
                     return;
                 }
-                ui.horizontal_wrapped(|ui| {
+                {
                     let keys: [(&str, &str, &'static str); 10] = [
                         ("F2", "Rename", "rename"),
                         ("F3", "View", "view"),
@@ -40,14 +40,9 @@ impl App {
                         ("Ctrl+Shift+P", "Commands", "command_palette"),
                         ("F12", "Appearance", "appearance"),
                     ];
-                    for (k, label, id) in keys {
-                        ui.label(egui::RichText::new(k).color(theme::c().dim).small());
-                        if ui.add(egui::Button::new(label).small()).clicked() {
-                            self.actions.push(Action::RunId(id));
-                        }
-                        ui.add_space(8.0);
-                    }
-                });
+                    let entries = keys.iter().map(|(k, label, id)| (k.to_string(), label.to_string(), Action::RunId(id))).collect();
+                    self.key_row(ui, entries, None);
+                }
             });
 
     }
@@ -73,18 +68,42 @@ impl App {
                 entries.push((sc.label(), label, cmd));
             }
         }
+        let empty = entries.is_empty().then(|| {
+            let held = Shortcut { key: Key::F1, ctrl: m.ctrl || m.command, shift: m.shift, alt: m.alt }.label();
+            let held = held.trim_end_matches("F1").trim_end_matches('+').to_string();
+            format!("No F-key commands with {held}")
+        });
+        let entries = entries.into_iter().map(|(k, label, cmd)| (k, label, Action::Run(cmd))).collect();
+        self.key_row(ui, entries, empty);
+    }
+
+    /// One line of key + button pairs, always the same height. Pairs that don't fit
+    /// are left out and "…" shows there are more (widen the window to see them).
+    fn key_row(&mut self, ui: &mut egui::Ui, entries: Vec<(String, String, Action)>, empty: Option<String>) {
         let th = theme::c();
-        ui.horizontal_wrapped(|ui| {
-            if entries.is_empty() {
-                let held = Shortcut { key: Key::F1, ctrl: m.ctrl || m.command, shift: m.shift, alt: m.alt }.label();
-                let held = held.trim_end_matches("F1").trim_end_matches('+');
-                ui.label(egui::RichText::new(format!("No F-key commands with {held}")).color(th.dim).small());
+        let small = egui::TextStyle::Small.resolve(ui.style());
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let gap = ui.spacing().item_spacing.x;
+        let pad = ui.spacing().button_padding.x * 2.0;
+        let width = |ui: &egui::Ui, t: &str, f: &FontId| ui.fonts(|fo| fo.layout_no_wrap(t.to_string(), f.clone(), Color32::WHITE).size().x);
+        let more_w = width(ui, "…", &body) + gap + 4.0;
+        ui.horizontal(|ui| {
+            ui.set_min_height(ui.spacing().interact_size.y);
+            if let Some(msg) = empty {
+                ui.label(egui::RichText::new(msg).color(th.dim).small());
                 return;
             }
-            for (k, label, cmd) in entries {
+            let n = entries.len();
+            for (i, (k, label, action)) in entries.into_iter().enumerate() {
+                let w = width(ui, &k, &small) + width(ui, &label, &body) + pad + gap * 3.0 + 8.0;
+                let reserve = if i + 1 < n { more_w } else { 0.0 };
+                if w + reserve > ui.available_width() {
+                    ui.label(egui::RichText::new("…").color(th.dim));
+                    break;
+                }
                 ui.label(egui::RichText::new(k).color(th.dim).small());
                 if ui.add(egui::Button::new(label).small()).clicked() {
-                    self.actions.push(Action::Run(cmd));
+                    self.actions.push(action);
                 }
                 ui.add_space(8.0);
             }
@@ -219,8 +238,13 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
 
         // --- the list ---
         let footer_h = 22.0;
-        let list_h = (ui.available_height() - footer_h).max(40.0);
         let row_h = theme::row_height(body_size);
+        // Show whole rows only, and keep the separator a few pixels below the list,
+        // so the line never runs through a half-visible name.
+        let gap = 4.0;
+        let room = (ui.available_height() - footer_h - gap).max(row_h);
+        let list_h = (room / row_h).floor().max(1.0) * row_h;
+        let spare = room - list_h;
         let n = pane.entries.len();
         let mut area = egui::ScrollArea::vertical()
             .id_salt(("list", idx))
@@ -260,6 +284,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
         pane.view_height = out.inner_rect.height();
 
         // --- footer ---
+        ui.add_space(spare + gap);
         let (foot_rect, _) = ui.allocate_exact_size(vec2(full_w, footer_h), Sense::hover());
         ui.painter().hline(foot_rect.x_range(), foot_rect.top(), Stroke::new(1.0, theme::c().border));
         let (dirs, files, sel, bytes) = pane.summary();
@@ -450,36 +475,56 @@ pub(crate) fn fit_name(ui: &egui::Ui, name: &str, suffix: &str, is_dir: bool, ma
     } else {
         name.rfind('.').filter(|&i| i > 0).map(|i| name[i..].chars().count()).unwrap_or(0)
     };
-    let tail_keep = (ext_len + 6).min(chars.len());
     let build = |head: usize, tail: usize| -> String {
         let h: String = chars[..head].iter().collect();
         let t: String = chars[chars.len() - tail..].iter().collect();
         format!("{h}…{t}{suffix}")
     };
-    // Shrink the start first; if even that doesn't fit, shrink the kept end too.
-    let max_head = chars.len().saturating_sub(tail_keep);
-    let (mut lo, mut hi) = (0usize, max_head);
+    // The most characters of the start that fit while keeping `tail` characters of the end.
+    let best_head = |tail: usize| -> Option<usize> {
+        if width(&build(0, tail)) > max_w {
+            return None;
+        }
+        let (mut lo, mut hi) = (0usize, chars.len().saturating_sub(tail));
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if width(&build(mid, tail)) <= max_w {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        Some(lo)
+    };
+    // Prefer keeping a bit of the end with the extension; when space is tight keep
+    // fewer end characters (down to just the extension) so the start stays readable.
+    let len = chars.len();
+    let mut tails = vec![(ext_len + 6).min(len), (ext_len + 2).min(len), ext_len.min(len)];
+    tails.dedup();
+    for &tail in &tails {
+        if let Some(head) = best_head(tail) {
+            if head >= 4.min(len - tail) {
+                return (build(head, tail), true);
+            }
+        }
+    }
+    // Very little room: as much of the start as fits, then the extension if possible.
+    for &tail in tails.iter().rev() {
+        if let Some(head) = best_head(tail) {
+            return (build(head, tail), true);
+        }
+    }
+    let (mut lo, mut hi) = (0usize, len);
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if width(&build(mid, tail_keep)) <= max_w {
+        let t: String = chars[..mid].iter().collect();
+        if width(&format!("{t}…")) <= max_w {
             lo = mid;
         } else {
             hi = mid - 1;
         }
     }
-    if lo > 0 || width(&build(0, tail_keep)) <= max_w {
-        return (build(lo, tail_keep), true);
-    }
-    let (mut lo, mut hi) = (1usize, tail_keep);
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        if width(&build(0, mid)) <= max_w {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    (build(0, lo), true)
+    (format!("{}…", chars[..lo].iter().collect::<String>()), true)
 }
 
 /// A small triangle pointing up (ascending) or down.
