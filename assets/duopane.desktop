@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Duopane
-Exec=@HOME@/.cargo/bin/duopane
-Icon=duopane
-Terminal=false
-Categories=Utility;
