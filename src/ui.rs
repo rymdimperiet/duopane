@@ -203,7 +203,7 @@ impl App {
 fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmarked: bool, actions: &mut Vec<Action>) {
     let frame = egui::Frame::default()
         .fill(theme::c().pane)
-        .stroke(Stroke::new(1.0, if active { theme::c().accent } else { theme::c().border }))
+        .stroke(Stroke::new(1.0_f32, if active { theme::c().accent } else { theme::c().border }))
         .corner_radius(4.0);
     let resp = frame.show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -247,7 +247,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
                 actions.push(Action::Activate(idx));
             }
         }
-        ui.painter().hline(head_rect.x_range(), head_rect.bottom(), Stroke::new(1.0, theme::c().border));
+        ui.painter().hline(head_rect.x_range(), head_rect.bottom(), Stroke::new(1.0_f32, theme::c().border));
 
         // --- the list ---
         let footer_h = 22.0;
@@ -299,7 +299,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
         // --- footer ---
         ui.add_space(spare + gap);
         let (foot_rect, _) = ui.allocate_exact_size(vec2(full_w, footer_h), Sense::hover());
-        ui.painter().hline(foot_rect.x_range(), foot_rect.top(), Stroke::new(1.0, theme::c().border));
+        ui.painter().hline(foot_rect.x_range(), foot_rect.top(), Stroke::new(1.0_f32, theme::c().border));
         let (dirs, files, sel, bytes) = pane.summary();
         let text = if sel > 0 {
             format!("{sel} of {} selected · {}", dirs + files, human_size(bytes))
@@ -328,7 +328,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
     let incoming = resp.response.dnd_hover_payload::<DragPayload>().is_some_and(|p| from_other(&p))
         || (resp.response.contains_pointer() && ui.input(|i| !i.raw.hovered_files.is_empty()));
     if incoming && pane.archive.is_none() {
-        ui.painter().rect_stroke(resp.response.rect, 4.0, Stroke::new(2.0, theme::c().accent), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(resp.response.rect, 4.0, Stroke::new(2.0_f32, theme::c().accent), egui::StrokeKind::Inside);
     }
     if let Some(p) = resp.response.dnd_release_payload::<DragPayload>().filter(|p| from_other(p)) {
         let mv = ui.input(|i| i.modifiers.shift);
@@ -505,7 +505,7 @@ fn row_ui(
     if e.is_dir {
         let into_itself = |p: &DragPayload| p.paths.contains(&e.path);
         if r.dnd_hover_payload::<DragPayload>().is_some_and(|p| !into_itself(&p)) {
-            painter.rect_stroke(bg, 3.0, Stroke::new(2.0, theme::c().accent), egui::StrokeKind::Inside);
+            painter.rect_stroke(bg, 3.0, Stroke::new(2.0_f32, theme::c().accent), egui::StrokeKind::Inside);
         }
         if let Some(p) = r.dnd_release_payload::<DragPayload>().filter(|p| !into_itself(p)) {
             let mv = ui.input(|i| i.modifiers.shift);

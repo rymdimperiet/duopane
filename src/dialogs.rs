@@ -211,7 +211,7 @@ impl App {
                             let b = if i == *focus {
                                 egui::Button::new(egui::RichText::new(label.as_str()).strong())
                                     .fill(theme::c().cursor)
-                                    .stroke(egui::Stroke::new(1.0, theme::c().accent))
+                                    .stroke(egui::Stroke::new(1.0_f32, theme::c().accent))
                             } else {
                                 egui::Button::new(label.as_str())
                             };
@@ -755,7 +755,7 @@ impl ConflictDialog {
                     let label = if matches!(choice, Choice::Other) { if self.more { "Other ▴" } else { "Other ▾" } } else { label };
                     let mut b = egui::Button::new(label).min_size(vec2(w, 30.0));
                     if i == self.focus {
-                        b = b.fill(theme::c().cursor).stroke(egui::Stroke::new(1.0, theme::c().accent));
+                        b = b.fill(theme::c().cursor).stroke(egui::Stroke::new(1.0_f32, theme::c().accent));
                     }
                     let mut r = ui.add_enabled(enabled, b);
                     if i >= 9 {

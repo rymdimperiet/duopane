@@ -151,7 +151,7 @@ impl QuickView {
     /// Draws the panel in place of a pane.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let th = theme::c();
-        let frame = egui::Frame::default().fill(th.pane).stroke(Stroke::new(1.0, th.border)).corner_radius(4.0);
+        let frame = egui::Frame::default().fill(th.pane).stroke(Stroke::new(1.0_f32, th.border)).corner_radius(4.0);
         frame.show(ui, |ui| {
             let full = ui.available_size();
             ui.set_min_size(full);

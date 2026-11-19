@@ -213,7 +213,7 @@ impl SearchDialog {
                     egui::RichText::new(*key).small().color(th.dim).append_to(&mut job, ui.style(), egui::FontSelection::Default, egui::Align::Center);
                     let mut button = egui::Button::new(job);
                     if self.button == Some(b) {
-                        button = button.fill(th.cursor).stroke(egui::Stroke::new(1.0, th.accent));
+                        button = button.fill(th.cursor).stroke(egui::Stroke::new(1.0_f32, th.accent));
                     }
                     if ui.add_enabled(n > 0 || b == 2, button).clicked() {
                         outcome = self.press(b);
