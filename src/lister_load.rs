@@ -68,6 +68,7 @@ fn run_plugin(p: &ListerPlugin, path: &Path, dark: bool) -> Result<Loaded, Strin
 pub const IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "ico", "tif", "tiff", "webp", "pnm", "pbm", "pgm", "ppm", "tga", "qoi"];
 pub const AUDIO_EXT: &[&str] = &["mp3", "flac", "ogg", "oga", "opus", "wav", "m4a", "aac", "wma", "aif", "aiff", "ape", "mka", "wv"];
 pub const VIDEO_EXT: &[&str] = &["mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts", "3gp", "ogv"];
+pub const MARKDOWN_EXT: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn"];
 const DOC_EXT: &[&str] = &["docx", "odt", "rtf"];
 
 /// Text bigger than this is cut off; hex shows up to this much.
@@ -93,6 +94,8 @@ pub struct TextDoc {
 
 pub enum Loaded {
     Text(TextDoc),
+    /// Markdown to show as a formatted page.
+    Markdown(String),
     Hex(Vec<u8>, bool),
     Image(ColorImage, [u32; 2]),
     Pdf { pages: usize },
@@ -121,6 +124,11 @@ pub fn load(path: &Path, mode: Mode, dark: bool, plugins: &[ListerPlugin]) -> Lo
                     // Fall back to the built-in viewers; say why in the text note if we end up there.
                     Err(err) => eprintln!("lister plugin {}: {err}", p.name),
                 }
+            }
+        }
+        if MARKDOWN_EXT.contains(&e.as_str()) {
+            if let Ok((bytes, _)) = read_limited(path) {
+                return Loaded::Markdown(decode_text(&bytes, false).0);
             }
         }
         if crate::archive::is_archive(path) {

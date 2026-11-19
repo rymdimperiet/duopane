@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Duopane icon: two folder panes side by side, the left one active. -->
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#1b1d22"/>
+  <rect x="34" y="50" width="88" height="156" rx="12" fill="#21242a" stroke="#4c9aff" stroke-width="6"/>
+  <rect x="134" y="50" width="88" height="156" rx="12" fill="#21242a" stroke="#4a515c" stroke-width="6"/>
+  <!-- rows -->
+  <rect x="46" y="70" width="50" height="10" rx="4" fill="#8cc8ff"/>
+  <rect x="42" y="94" width="72" height="20" rx="5" fill="#2b4f7d"/>
+  <rect x="50" y="99" width="48" height="10" rx="4" fill="#d6d9df"/>
+  <rect x="46" y="126" width="56" height="10" rx="4" fill="#ffb454"/>
+  <rect x="46" y="150" width="42" height="10" rx="4" fill="#d6d9df"/>
+  <rect x="46" y="174" width="52" height="10" rx="4" fill="#d6d9df"/>
+  <rect x="146" y="70" width="44" height="10" rx="4" fill="#8cc8ff"/>
+  <rect x="146" y="102" width="58" height="10" rx="4" fill="#8b919c"/>
+  <rect x="146" y="126" width="40" height="10" rx="4" fill="#8b919c"/>
+  <rect x="146" y="150" width="50" height="10" rx="4" fill="#8b919c"/>
+</svg>

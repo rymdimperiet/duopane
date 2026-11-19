@@ -99,11 +99,20 @@ impl App {
         if self.job.is_none() && !searching && !message {
             return;
         }
-        egui::TopBottomPanel::bottom("status")
-            .frame(egui::Frame::default().fill(theme::c().bg).inner_margin(egui::Margin::symmetric(10, 4)))
+        // A small note floating over the bottom-left of the panes, so nothing in the
+        // window moves when a message comes and goes.
+        let area = self.panes_rect.unwrap_or_else(|| ctx.screen_rect());
+        let pos = egui::pos2(area.left() + 16.0, area.bottom() - 34.0);
+        egui::Area::new(egui::Id::new("status_note"))
+            .order(egui::Order::Foreground)
+            .pivot(Align2::LEFT_BOTTOM)
+            .fixed_pos(pos)
             .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .fill(theme::c().header)
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.set_min_height(20.0);
                     if let Some(job) = &self.job {
                         let in_bytes = job.label.starts_with("Copying")
                             || job.label.starts_with("Extracting")
@@ -135,13 +144,15 @@ impl App {
                         }
                     }
                 });
+                    });
             });
     }
 
     pub(crate) fn panes_ui(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(theme::c().bg).inner_margin(6.0))
+            .frame(egui::Frame::default().fill(theme::c().bg).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 2 }))
             .show(ctx, |ui| {
+                self.panes_rect = Some(ui.max_rect());
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let active = self.active;
                 let b0 = self.settings.bookmarks.contains(&self.panes[0].path);

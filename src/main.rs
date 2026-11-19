@@ -36,12 +36,16 @@ fn main() -> eframe::Result<()> {
     // Optional: `duopane <left folder> [right folder]`
     let args: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
 
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("Duopane")
+        .with_app_id("duopane")
+        .with_inner_size([1200.0, 760.0])
+        .with_min_inner_size([640.0, 360.0]);
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../packaging/duopane.png")) {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Duopane")
-            .with_app_id("duopane")
-            .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([640.0, 360.0]),
+        viewport,
         ..Default::default()
     };
 

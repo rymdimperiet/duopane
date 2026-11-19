@@ -25,6 +25,8 @@ pub enum ListerAction {
 enum Content {
     Loading(Receiver<Loaded>),
     Text(TextDoc),
+    /// Markdown shown as a formatted page; `base` makes relative picture links work.
+    Markdown { text: String, cache: Box<egui_commonmark::CommonMarkCache>, base: String },
     Hex(Vec<u8>, bool),
     Image { tex: TextureHandle, orig: [u32; 2] },
     Pdf(PdfView),
@@ -199,6 +201,7 @@ impl Lister {
                             Content::Media(_) => "Space play/pause · Left/Right seek 5 s · Up/Down volume · N/P next/previous file · Esc close",
                             Content::Pdf(_) => "PgUp/PgDn page · +/−/0 zoom · N/P next/previous file · Esc close",
                             Content::Image { .. } => "+/−/0 zoom · N/P next/previous file · Esc close",
+                            Content::Markdown { .. } => "Up/Down/PgUp/PgDn scroll · 2 source · 3 hex · N/P next/previous file · Esc close",
                             _ => "Ctrl+F find · W wrap · 1/2/3 preview/text/hex · N/P next/previous file · Esc close",
                         };
                         ui.label(egui::RichText::new(hint).color(th.dim).small());
@@ -217,6 +220,7 @@ impl Lister {
                     ui.centered_and_justified(|ui| ui.label(egui::RichText::new(e.as_str()).color(th.error)));
                 }
                 Content::Text(_) | Content::Hex(..) => self.text_ui(ui),
+                Content::Markdown { .. } => self.markdown_ui(ui),
                 Content::Image { tex, .. } => image_ui(ui, tex, &mut self.zoom, &mut self.fit),
                 Content::Pdf(pdf) => pdf_ui(ui, ctx, pdf, &self.path, &mut self.zoom, &mut self.fit),
                 Content::Media(m) => {
@@ -233,6 +237,7 @@ impl Lister {
         match &self.content {
             Content::Loading(_) => size,
             Content::Error(_) => size,
+            Content::Markdown { text, .. } => format!("Markdown · {} lines · {size} · 2 shows the source", text.lines().count()),
             Content::Text(d) => {
                 let mut s = format!("{} · {} lines · {size}", d.kind, d.lines.len());
                 if !d.note.is_empty() {
@@ -260,6 +265,10 @@ impl Lister {
             let Ok(loaded) = rx.try_recv() else { return };
             self.content = match loaded {
                 Loaded::Text(d) => Content::Text(d),
+                Loaded::Markdown(text) => {
+                    let dir = self.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                    Content::Markdown { text, cache: Box::default(), base: format!("file://{dir}/") }
+                }
                 Loaded::Hex(b, cut) => Content::Hex(b, cut),
                 Loaded::Error(e) => Content::Error(e),
                 Loaded::Image(img, orig) => {
@@ -403,7 +412,7 @@ impl Lister {
                     pdf.page = pdf.pages;
                 }
             }
-            Content::Text(_) | Content::Hex(..) => {
+            Content::Text(_) | Content::Hex(..) | Content::Markdown { .. } => {
                 let row = 18.0;
                 let page = (self.view_h - row).max(row);
                 let mut target = None;
@@ -478,6 +487,33 @@ impl Lister {
             }
             _ => line,
         }
+    }
+
+    /// Markdown as a readable page, centred, at most about 900 points wide.
+    fn markdown_ui(&mut self, ui: &mut egui::Ui) {
+        let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(o) = self.want_offset.take() {
+            area = area.vertical_scroll_offset(o);
+        }
+        let Content::Markdown { text, cache, base } = &mut self.content else { return };
+        let out = area.show(ui, |ui| {
+            let w = ui.available_width();
+            let col = w.min(900.0);
+            ui.horizontal(|ui| {
+                ui.add_space(((w - col) / 2.0).max(0.0) + 20.0);
+                ui.vertical(|ui| {
+                    ui.set_max_width(col - 40.0);
+                    ui.add_space(16.0);
+                    egui_commonmark::CommonMarkViewer::new()
+                        .default_implicit_uri_scheme(base.as_str())
+                        .max_image_width(Some((col - 40.0) as usize))
+                        .show(ui, cache, text);
+                    ui.add_space(32.0);
+                });
+            });
+        });
+        self.offset = out.state.offset.y;
+        self.view_h = out.inner_rect.height();
     }
 
     fn text_ui(&mut self, ui: &mut egui::Ui) {

@@ -21,6 +21,18 @@ cargo test                          # run the tests
 
 The finished program is `target/release/duopane`. Copy it anywhere on your `PATH`.
 
+### AppImage (one file that runs on most Linux systems)
+
+    sh packaging/build-appimage.sh
+
+makes `target/appimage/Duopane-<version>-x86_64.AppImage` (it downloads the
+official `appimagetool` the first time if it isn't installed). An AppImage runs on
+systems with the same or a newer C library than the one it was built on, so for
+the widest reach let GitHub build it on an older Ubuntu: create a release with a
+version tag such as `v0.2.0` and the "Release AppImage" workflow attaches the
+AppImage to it, or start that workflow by hand from the repository's Actions tab.
+PDF and video previews still need poppler and ffmpeg on the computer that runs it.
+
 ## Using it
 
 | Keys | What it does |
@@ -107,6 +119,8 @@ F3 opens the file under the cursor in a full-window viewer:
 - **Music**: MP3, FLAC, Ogg, WAV, M4A/AAC and more, with tags and cover art.
   Space plays/pauses, Left/Right seek, Up/Down change the volume.
 - **Video**: MP4, MKV, WebM, AVI, MOV… with sound. Needs `ffmpeg` and `ffprobe`.
+- **Markdown** (.md): shown as a formatted page with headings, lists, tables,
+  coloured code and pictures; `2` shows the source.
 - **Archives** (ZIP, TAR, TAR.GZ): a list of what's inside.
 - Any other file shows as hex. Keys `1` / `2` / `3` switch between preview, text and hex.
 

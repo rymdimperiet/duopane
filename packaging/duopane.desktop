@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Duopane
+GenericName=File Manager
+Comment=Keyboard-driven dual-pane file manager
+Exec=duopane %F
+Icon=duopane
+Terminal=false
+Categories=System;FileTools;FileManager;Utility;
+MimeType=inode/directory;
+Keywords=files;folders;commander;dual-pane;

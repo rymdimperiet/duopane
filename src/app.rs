@@ -93,6 +93,8 @@ pub struct App {
     pub(crate) lister: Option<crate::lister::Lister>,
     /// The last batch rename: folder and (new name, old name) pairs, for undo.
     pub(crate) last_batch: Option<(PathBuf, Vec<(String, String)>)>,
+    /// Where the two panes were drawn last frame (the status note floats over it).
+    pub(crate) panes_rect: Option<egui::Rect>,
 }
 
 impl App {
@@ -100,6 +102,8 @@ impl App {
         let (settings, settings_error) = Settings::load();
         theme::apply(&cc.egui_ctx, &settings);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        // Lets the lister's Markdown view show pictures from files.
+        egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let abs = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
@@ -135,6 +139,7 @@ impl App {
             size_rx: None,
             lister: None,
             last_batch: None,
+            panes_rect: None,
         };
         app.rebuild_bindings();
         if let Some(e) = settings_error {
@@ -369,7 +374,8 @@ impl App {
                     if std::mem::take(&mut skip_text) {
                         continue;
                     }
-                    if mods_now.command || mods_now.ctrl || mods_now.alt || t.trim().is_empty() {
+                    // Some systems send invisible codes with Alt and similar keys: those aren't a name search.
+                    if mods_now.command || mods_now.ctrl || mods_now.alt || t.trim().is_empty() || t.chars().any(char::is_control) {
                         continue;
                     }
                     // Numpad * inverts the selection, like Double Commander.

@@ -1,0 +1,39 @@
+# Builds the Duopane AppImage on GitHub's servers.
+#
+# - Push a version tag (e.g. `git tag v0.2.0 && git push --tags`) and the AppImage
+#   is attached to a GitHub release for that tag.
+# - Or run it by hand from the Actions tab; the AppImage is then under the run's
+#   "Artifacts".
+#
+# It builds on Ubuntu 22.04 on purpose: an AppImage runs on systems as new as or
+# newer than the one it was built on, so an older base reaches more people.
+name: Release AppImage
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the sound library headers (needed to build)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the AppImage
+        run: sh packaging/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Duopane-AppImage
+          path: target/appimage/Duopane-*.AppImage
+      - name: Attach it to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/appimage/Duopane-*.AppImage
