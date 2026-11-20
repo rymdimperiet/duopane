@@ -297,7 +297,11 @@ impl SearchDialog {
                 }
                 let y = rect.center().y;
                 let name = h.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let color = if h.is_dir { th.folder } else { th.text };
+                let color = if h.is_dir {
+                    th.folder
+                } else {
+                    crate::filetypes::category(&name, false).and_then(theme::file_color).unwrap_or(th.text)
+                };
                 p.text(pos2(rect.left() + 8.0, y), Align2::LEFT_CENTER, if h.is_dir { "🗀" } else { "🗋" }, font.clone(), color);
                 let name_r = p.text(pos2(rect.left() + 32.0, y), Align2::LEFT_CENTER, &name, font.clone(), color);
                 // Where it is (below the searched folder), dimmed, then size and date on the right.

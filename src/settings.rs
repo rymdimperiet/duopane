@@ -68,6 +68,8 @@ pub struct Settings {
     pub lister_wrap: bool,
     /// Alternate the brightness of rows in the file lists.
     pub striped_rows: bool,
+    /// Colour files by kind (pictures, music, archives…).
+    pub color_file_types: bool,
     /// How different striped rows look, in percent of the text colour laid over
     /// the background. None: the colour scheme's own (6 dark, 8 light).
     pub stripe_percent: Option<f32>,
@@ -117,6 +119,7 @@ impl Default for Settings {
             mono_font_weight: 400,
             lister_wrap: false,
             striped_rows: true,
+            color_file_types: true,
             stripe_percent: None,
             show_key_bar: true,
             show_dotdot: true,

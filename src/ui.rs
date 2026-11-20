@@ -467,6 +467,7 @@ fn row_ui(
     } else if r.hovered() {
         painter.rect_filled(bg, 3.0, theme::c().text.gamma_multiply(0.05));
     }
+    let kind = || crate::filetypes::category(&e.name, e.executable).and_then(theme::file_color);
     let color = if selected {
         theme::c().selected
     } else if e.is_dir {
@@ -474,7 +475,7 @@ fn row_ui(
     } else if e.is_symlink {
         theme::c().symlink
     } else {
-        theme::c().text
+        kind().unwrap_or(theme::c().text)
     };
     let y = rect.center().y;
     let (c_name, c_size, c_date) = columns(rect, widths);

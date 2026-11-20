@@ -30,6 +30,8 @@ pub struct Entry {
     pub is_symlink: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    /// A file that can be run (its permission says so).
+    pub executable: bool,
 }
 
 impl Entry {
@@ -361,7 +363,15 @@ impl Pane {
             if let Some(parent) = up {
                 entries.insert(
                     0,
-                    Entry { name: "..".into(), path: parent.to_path_buf(), is_dir: true, is_symlink: false, size: 0, modified: None },
+                    Entry {
+                        name: "..".into(),
+                        path: parent.to_path_buf(),
+                        is_dir: true,
+                        is_symlink: false,
+                        size: 0,
+                        modified: None,
+                        executable: false,
+                    },
                 );
             }
         }
@@ -753,6 +763,7 @@ fn fetch_results(set: Arc<ResultSet>) -> Fetched {
                 is_symlink,
                 size: if meta.is_dir() { 0 } else { meta.len() },
                 modified: meta.modified().ok(),
+                executable: is_executable(&meta),
             })
         })
         .collect();
@@ -780,6 +791,7 @@ fn fetch_archive(path: &Path, file: &Path, cache: IndexCache) -> Result<Fetched,
             is_symlink: false,
             size: e.size,
             modified: e.modified,
+            executable: false,
         })
         .collect();
     Ok(Fetched::Archive { all, state: ArchiveState { file: file.to_path_buf(), index, mtime } })
@@ -810,9 +822,24 @@ fn read_entries(path: &Path) -> std::io::Result<Vec<Entry>> {
             Some(m) => (m.is_dir(), if m.is_dir() { 0 } else { m.len() }, m.modified().ok()),
             None => (false, 0, None),
         };
-        out.push(Entry { name, path: p, is_dir, is_symlink, size, modified });
+        let executable = meta.as_ref().is_some_and(is_executable);
+        out.push(Entry { name, path: p, is_dir, is_symlink, size, modified, executable });
     }
     Ok(out)
+}
+
+/// A regular file anyone may run (Unix permission bits; never on other systems).
+fn is_executable(m: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        m.is_file() && m.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = m;
+        false
+    }
 }
 
 /// Case-insensitive comparison where "file2" sorts before "file10".

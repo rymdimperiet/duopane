@@ -3,7 +3,9 @@
 //! Pick a scheme and fonts in the Appearance dialog (F12). Single colours can be
 //! overridden in the settings file under `custom_colors`, e.g. `"folder": "#ffcc00"`.
 //! Keys: bg, pane, header, border, accent, text, dim, folder, symlink, selected,
-//! cursor, cursor_inactive, error, ok, stripe (the darker/brighter every-other row).
+//! cursor, cursor_inactive, error, ok, stripe (the darker/brighter every-other row),
+//! and the file kinds: picture, video, music, document, archive, code, program,
+//! temporary (see `filetypes.rs`).
 
 use crate::settings::Settings;
 use eframe::egui::{self, Color32, FontFamily, FontId, TextStyle};
@@ -29,6 +31,8 @@ pub struct Theme {
     pub ok: Color32,
     /// Background of every other row (None = rows not striped).
     pub stripe: Option<Color32>,
+    /// Colours for the kinds of file, in `Category::ALL` order (None = not coloured).
+    pub files: Option<[Color32; 8]>,
 }
 
 const fn hex(v: u32) -> Color32 {
@@ -42,6 +46,7 @@ const fn t(light: bool, bg: u32, pane: u32, header: u32, border: u32, accent: u3
         light, bg: hex(bg), pane: hex(pane), header: hex(header), border: hex(border), accent: hex(accent),
         text: hex(text), dim: hex(dim), folder: hex(folder), symlink: hex(symlink), selected: hex(selected),
         cursor: hex(cursor), cursor_inactive: hex(cursor_inactive), error: hex(error), ok: hex(ok), stripe: None,
+        files: None,
     }
 }
 
@@ -62,6 +67,27 @@ pub const SCHEMES: &[(&str, Theme)] = &[
     ("High Contrast", t(false, 0x000000, 0x000000, 0x1a1a1a, 0xffffff, 0xffff00, 0xffffff, 0xd0d0d0,
                         0x00ffff, 0xff80ff, 0xffff00, 0x0000c0, 0x303030, 0xff4040, 0x40ff40)),
 ];
+
+/// Each scheme's colours for the kinds of file: picture, video, music, document,
+/// archive, code, program, temporary. Each is readable on the scheme's background
+/// (WCAG contrast 4.5, temporary 3) and clearly apart from its folder, selection,
+/// link and text colours and from each other; the scheme's own palette colours are
+/// used where they pass. Change with care: test the same way before swapping one.
+const FILE_COLORS: &[(&str, [u32; 8])] = &[
+    ("Duopane Dark", [0xf5a3c7, 0xeb91f3, 0x6fd6c8, 0xefe2be, 0xf28b82, 0xa8d98b, 0xe6e36b, 0x6b717c]),
+    ("Duopane Light", [0xc2185b, 0x8f23a4, 0x0f857b, 0x6d4c41, 0xd5393e, 0x2e7d32, 0x8b7504, 0x8d949a]),
+    ("Commander Blue", [0xff55ff, 0xe2a7e2, 0x56fbd1, 0xd6c4b3, 0xfb6456, 0x55ff55, 0xafff5f, 0x8787af]),
+    ("Solarized Dark", [0xfb60a0, 0xbb90da, 0x05a7c7, 0xeee8d5, 0xfb6c56, 0x60ac39, 0xc6b353, 0x707d89]),
+    ("Nord", [0xfdb4df, 0xcfa7ec, 0x94d5db, 0xd1c0a9, 0xf39599, 0xa3be8c, 0xf0a882, 0x848fa4]),
+    ("Gruvbox Dark", [0xfdc3d7, 0xdb94db, 0x8ec07c, 0xbb9e81, 0xfa563d, 0xb8bb26, 0xfe8019, 0x7c6f64]),
+    ("High Contrast", [0xff80c0, 0xc383f1, 0x00ff80, 0xe0e0a0, 0xff6060, 0x84fc79, 0xff9000, 0x80878e]),
+];
+
+/// The colour for a kind of file, if files are coloured by kind.
+pub fn file_color(cat: crate::filetypes::Category) -> Option<Color32> {
+    let i = crate::filetypes::Category::ALL.iter().position(|c| *c == cat)?;
+    c().files.map(|f| f[i])
+}
 
 thread_local! {
     static CURRENT: Cell<Theme> = const { Cell::new(SCHEMES[0].1) };
@@ -114,6 +140,19 @@ pub fn apply(ctx: &egui::Context, s: &Settings) {
         };
         *slot = col;
     }
+    // File kinds: the scheme's colours (light schemes fall back to Duopane Light's,
+    // dark ones to Duopane Dark's), each overridable by its key in custom_colors.
+    th.files = s.color_file_types.then(|| {
+        let fallback = if th.light { FILE_COLORS[1].1 } else { FILE_COLORS[0].1 };
+        let base = FILE_COLORS.iter().find(|(n, _)| *n == s.color_scheme).map_or(fallback, |x| x.1);
+        let mut out = base.map(hex);
+        for (i, cat) in crate::filetypes::Category::ALL.iter().enumerate() {
+            if let Some(col) = s.custom_colors.get(cat.key()).and_then(|v| parse_hex(v)) {
+                out[i] = col;
+            }
+        }
+        out
+    });
     th.stripe = s.striped_rows.then(|| {
         s.custom_colors
             .get("stripe")

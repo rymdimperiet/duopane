@@ -508,6 +508,21 @@ impl App {
                         });
                         ui.end_row();
 
+                        ui.label("Files");
+                        ui.vertical(|ui| {
+                            changed |= ui.checkbox(&mut self.settings.color_file_types, "Colour files by kind").changed();
+                            if self.settings.color_file_types {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 10.0;
+                                    for (cat, label) in crate::filetypes::Category::ALL.into_iter().zip(FILE_KIND_NAMES) {
+                                        let col = theme::file_color(cat).unwrap_or(theme::c().text);
+                                        ui.label(egui::RichText::new(label).color(col)).on_hover_text(format!("\"{}\" under custom_colors in the settings file", cat.key()));
+                                    }
+                                });
+                            }
+                        });
+                        ui.end_row();
+
                         ui.label("Bottom bar");
                         if ui.checkbox(&mut self.settings.show_key_bar, "Show the function-key bar (F2 Rename, F3 View…)").changed() {
                             self.dirty = true;
@@ -527,16 +542,20 @@ impl App {
                     ui.add_space(10.0);
                     // A small preview of the colours.
                     let th = theme::c();
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 96.0), Sense::hover());
-                    let p = ui.painter_at(rect);
-                    p.rect_filled(rect, 4.0, th.pane);
-                    let font = FontId::proportional(self.settings.font_size);
-                    let rows: [(&str, Color32, Option<Color32>); 4] = [
+                    let kind = |c| theme::file_color(c).unwrap_or(th.text);
+                    use crate::filetypes::Category;
+                    let rows: [(&str, Color32, Option<Color32>); 6] = [
                         ("🗀  Documents", th.folder, None),
                         ("🗋  notes.txt", th.text, Some(th.cursor)),
                         ("🗋  photo.jpg", th.selected, None),
+                        ("🗋  Night Train.flac", kind(Category::Music), None),
+                        ("🗋  backup.zip", kind(Category::Archive), None),
                         ("🗋  link ↗", th.symlink, None),
                     ];
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0 + rows.len() as f32 * 22.0), Sense::hover());
+                    let p = ui.painter_at(rect);
+                    p.rect_filled(rect, 4.0, th.pane);
+                    let font = FontId::proportional(self.settings.font_size);
                     for (i, (t, c, bg)) in rows.iter().enumerate() {
                         let r = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0 + i as f32 * 22.0), egui::vec2(rect.width() - 8.0, 22.0));
                         if let Some(stripe) = th.stripe.filter(|_| i % 2 == 1) {
@@ -997,6 +1016,9 @@ fn palette_ui(ctx: &egui::Context, st: &mut PaletteState) -> (bool, Option<Palet
 }
 
 /// A searchable list of installed fonts. Returns true when the choice changed.
+/// The kinds of file as named in Appearance, in `Category::ALL` order.
+const FILE_KIND_NAMES: [&str; 8] = ["Pictures", "Video", "Music", "Documents", "Archives", "Code", "Programs", "Temporary"];
+
 /// Where the source lives (shown as a link in the About box).
 const REPOSITORY: &str = "https://github.com/rymdimperiet/duopane";
 

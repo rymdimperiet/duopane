@@ -18,12 +18,14 @@
 //! - `quickview.rs` – Quick view (Ctrl+Q): details of the item under the cursor
 //! - `native_drag.rs` – drag and drop with other apps on Wayland
 //! - `theme.rs`    – colour schemes, fonts and sizes
+//! - `filetypes.rs` – which kind a file is (picture, music, archive…), for its colour
 
 mod actions;
 mod app;
 mod archive;
 mod commands;
 mod dialogs;
+mod filetypes;
 mod fs_ops;
 mod lister;
 mod lister_load;

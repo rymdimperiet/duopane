@@ -253,7 +253,10 @@ Choose a colour scheme (Duopane Dark/Light, Commander Blue, Solarized Dark, Nord
 Gruvbox Dark, High Contrast) and any font installed on your computer, for the
 interface and for the lister's monospace text, in any weight it's installed in
 (Light, Regular, Medium, Bold…). With striped rows on, *Row contrast* sets how
-much every other row stands out. Changes apply at once. Single colours can be
+much every other row stands out. Files are coloured by kind (pictures, video,
+music, documents, archives, code, programs and temporary files), in colours
+picked for each scheme to stay readable and apart from folders and the
+selection; this can be turned off. Changes apply at once. Single colours can be
 overridden in the settings file:
 
 ```json
@@ -261,7 +264,8 @@ overridden in the settings file:
 ```
 
 Keys: bg, pane, header, border, accent, text, dim, folder, symlink, selected,
-cursor, cursor_inactive, error, ok, stripe (every other row).
+cursor, cursor_inactive, error, ok, stripe (every other row), and the kinds of
+file: picture, video, music, document, archive, code, program, temporary.
 
 Every folder starts with a “..” row (Enter on it goes up a level); it can't be
 selected, renamed, copied or deleted. Both it and the striped rows can be turned
