@@ -116,9 +116,11 @@ impl App {
     /// F3: opens the lister on the file under the cursor.
     pub fn view_file(&mut self) {
         let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
-        if e.is_dir {
-            return self.set_status("That's a folder; put the cursor on a file to view it", true);
+        // A folder shows as a tree of everything below it.
+        if e.is_dir && self.panes[self.active].archive.is_some() {
+            return self.set_status("That's a folder inside the archive; Enter opens it", true);
         }
+        crate::lister_load::set_tree_hidden(self.settings.show_hidden);
         let Some(path) = self.materialize(&e.path) else { return };
         self.lister = Some(crate::lister::Lister::open(&path, crate::lister_load::Mode::Auto, self.settings.lister_wrap, self.settings.lister_plugins.clone()));
     }

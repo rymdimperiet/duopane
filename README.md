@@ -74,11 +74,11 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Ctrl+M | **Batch rename** the selection (or the whole folder) |
 | F7 | New folder (`a/b/c` makes nested folders) |
 | Shift+F4 | New file |
-| F3 | **Lister**: view the file (see below) |
+| F3 | **Lister**: view the file (see below); on a folder, a tree of everything in it |
 | F4 | Edit the file |
 | F8 or Delete | Move to the trash |
 | Shift+F8 or Shift+Delete | Delete permanently |
-| Ctrl+F3 / F4 / F5 / F6 | Sort by name / type / date / size (press again to reverse) |
+| Ctrl+1 / 2 / 3 / 4 (or Ctrl+F3 / F4 / F5 / F6) | Sort by name / type / date / size (press again to reverse) |
 | Ctrl+. or Ctrl+H | Show / hide hidden files |
 | Ctrl+L | Type a location |
 | Ctrl+B | Bookmark this folder (bookmarks rank first in Go to) |
@@ -215,7 +215,10 @@ F3 opens the file under the cursor in a full-window viewer:
   UTF-16 and Latin-1; Word (.docx), OpenDocument (.odt) and RTF show their text.
   Ctrl+F finds (Enter or F3 for the next match), W wraps long lines.
 - **Pictures**: PNG, JPEG, GIF, BMP, WebP, TIFF, ICO, TGA… `+`/`-` or Ctrl+wheel to zoom, `0` to fit.
-- **PDF**: page by page (PgUp/PgDn), with zoom. Needs poppler (`pdftoppm`, `pdfinfo`).
+  When zoomed in, the arrow keys move round the picture (PgUp/PgDn a screenful, Home/End top/bottom).
+- **PDF**: page by page (←/→ or PgUp/PgDn), with zoom. ↑/↓ scroll the page and run on
+  into the next or previous one, so a document reads straight through; Shift+←/→ scroll
+  sideways when zoomed in. Needs poppler (`pdftoppm`, `pdfinfo`).
 - **Music**: MP3, FLAC, Ogg, WAV, M4A/AAC and more, with tags and cover art.
   Space plays/pauses, Left/Right seek, Up/Down change the volume.
 - **Video**: MP4, MKV, WebM, AVI, MOV… with sound. Needs `ffmpeg` and `ffprobe`.

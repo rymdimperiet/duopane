@@ -677,6 +677,8 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Pictures in the viewer are scaled to what the graphics card can hold.
+        crate::lister_load::set_max_texture_side(ctx.input(|i| i.max_texture_side));
         self.poll_background();
         if self.lister.is_some() {
             self.lister_frame(ctx);

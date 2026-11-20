@@ -4,12 +4,14 @@
 //! Keys: Esc/Q/F3 close · N/P next/previous file · 1 preview, 2 text, 3 hex ·
 //! W wrap · Ctrl+F find (Enter = next) · +/-/0 zoom · PgUp/PgDn pages ·
 //! Space play/pause · Left/Right seek · Up/Down volume (media).
+//! PDF: Up/Down scroll and run on into the next / previous page; Shift+Left/Right
+//! scroll sideways. Zoomed pictures: the arrows, PgUp/PgDn, Home/End move round.
 
 use crate::lister_load::{self, Loaded, Mode, TextDoc};
 use crate::media::{fmt_time, Player};
 use crate::pane::human_size;
 use crate::theme;
-use eframe::egui::{self, pos2, text::LayoutJob, vec2, Align2, Color32, ColorImage, FontId, Key, Modifiers, Rect, Sense, TextFormat, TextureHandle, TextureOptions};
+use eframe::egui::{self, pos2, text::LayoutJob, vec2, Align2, Color32, ColorImage, FontId, Key, Modifiers, Rect, Sense, TextFormat, TextureHandle, TextureOptions, Vec2};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
@@ -78,7 +80,62 @@ pub struct Lister {
     wrap_rows: Option<WrapRows>,
     /// The scale used when fitting to the window (zooming starts from here).
     fit: f32,
+    /// Pictures/PDF: where the view is scrolled to, for the arrow keys.
+    scroll: Scroll,
     plugins: Vec<crate::settings::ListerPlugin>,
+}
+
+/// The scroll position of a zoomed picture or a PDF page, as drawn last frame,
+/// and where the keys want it next.
+#[derive(Default)]
+struct Scroll {
+    offset: Vec2,
+    /// How far it can scroll (content minus what fits in the window).
+    max: Vec2,
+    /// The size of the visible part.
+    view: Vec2,
+    /// Scroll here on the next frame (clamped by egui, so huge means "the end").
+    want: Option<Vec2>,
+}
+
+impl Scroll {
+    fn at_top(&self) -> bool {
+        self.offset.y <= 0.5
+    }
+
+    fn at_bottom(&self) -> bool {
+        self.offset.y >= self.max.y - 0.5
+    }
+
+    /// Moves by `d`, from wherever a move already asked for this frame would land.
+    fn by(&mut self, d: Vec2) {
+        let from = self.want.unwrap_or(self.offset);
+        self.want = Some((from + d).clamp(Vec2::ZERO, self.max.max(Vec2::ZERO)));
+    }
+
+    /// One arrow-key step, and one screenful.
+    fn step(&self) -> Vec2 {
+        (self.view * 0.15).max(Vec2::splat(40.0))
+    }
+
+    fn screen(&self) -> Vec2 {
+        self.view * 0.9
+    }
+
+    /// Takes the wanted position into a scroll area, and keeps what it reports.
+    fn show<R>(&mut self, area: egui::ScrollArea, ui: &mut egui::Ui, apply: bool, add: impl FnOnce(&mut egui::Ui) -> R) {
+        let area = match self.want.filter(|_| apply) {
+            Some(w) => {
+                self.want = None;
+                area.scroll_offset(w)
+            }
+            None => area,
+        };
+        let out = area.show(ui, add);
+        self.offset = out.state.offset;
+        self.view = out.inner_rect.size();
+        self.max = (out.content_size - out.inner_rect.size()).max(Vec2::ZERO);
+    }
 }
 
 impl Lister {
@@ -105,6 +162,7 @@ impl Lister {
             view_h: 400.0,
             wrap_rows: None,
             fit: 1.0,
+            scroll: Scroll::default(),
             plugins,
         }
     }
@@ -203,8 +261,8 @@ impl Lister {
                     } else {
                         let hint = match &self.content {
                             Content::Media(_) => "Space play/pause · Left/Right seek 5 s · Up/Down volume · N/P next/previous file · Esc close",
-                            Content::Pdf(_) => "PgUp/PgDn page · +/−/0 zoom · N/P next/previous file · Esc close",
-                            Content::Image { .. } => "+/−/0 zoom · N/P next/previous file · Esc close",
+                            Content::Pdf(_) => "↑/↓ scroll · ←/→ or PgUp/PgDn page · +/−/0 zoom · N/P next/previous file · Esc close",
+                            Content::Image { .. } => "+/−/0 zoom · arrows move round a zoomed picture · N/P next/previous file · Esc close",
                             Content::Markdown { .. } => "Up/Down/PgUp/PgDn scroll · 2 source · 3 hex · N/P next/previous file · Esc close",
                             _ => "Ctrl+F find · W wrap · 1/2/3 preview/text/hex · N/P next/previous file · Esc close",
                         };
@@ -225,8 +283,8 @@ impl Lister {
                 }
                 Content::Text(_) | Content::Hex(..) => self.text_ui(ui),
                 Content::Markdown { .. } => self.markdown_ui(ui),
-                Content::Image { tex, .. } => image_ui(ui, tex, &mut self.zoom, &mut self.fit),
-                Content::Pdf(pdf) => pdf_ui(ui, ctx, pdf, &self.path, &mut self.zoom, &mut self.fit),
+                Content::Image { tex, .. } => image_ui(ui, tex, &mut self.zoom, &mut self.fit, &mut self.scroll),
+                Content::Pdf(pdf) => pdf_ui(ui, ctx, pdf, &self.path, &mut self.zoom, &mut self.fit, &mut self.scroll),
                 Content::Media(m) => {
                     if let Some(v) = media_ui(ui, ctx, m, *volume) {
                         *volume = v;
@@ -243,7 +301,12 @@ impl Lister {
             Content::Error(_) => size,
             Content::Markdown { text, .. } => format!("Markdown · {} lines · {size} · 2 shows the source", text.lines().count()),
             Content::Text(d) => {
-                let mut s = format!("{} · {} lines · {size}", d.kind, d.lines.len());
+                // A folder's own size means nothing here; the tree ends with the real total.
+                let mut s = if d.kind == "Folder" {
+                    format!("Folder · {} lines", d.lines.len())
+                } else {
+                    format!("{} · {} lines · {size}", d.kind, d.lines.len())
+                };
                 if !d.note.is_empty() {
                     s.push_str(" · ");
                     s.push_str(&d.note);
@@ -403,6 +466,32 @@ impl Lister {
                 }
             }
             Content::Pdf(pdf) => {
+                let s = &mut self.scroll;
+                let page = pdf.page;
+                // ↑ / ↓ scroll within the page and run on into the next or previous one,
+                // so a document reads straight through with one key.
+                if pressed(Key::ArrowDown) {
+                    if s.at_bottom() && pdf.page < pdf.pages {
+                        pdf.page += 1;
+                    } else {
+                        s.by(vec2(0.0, s.step().y));
+                    }
+                }
+                if pressed(Key::ArrowUp) {
+                    if s.at_top() && pdf.page > 1 {
+                        pdf.page -= 1;
+                        s.want = Some(vec2(s.offset.x, f32::MAX)); // its bottom
+                    } else {
+                        s.by(vec2(0.0, -s.step().y));
+                    }
+                }
+                // Shift+← / → scroll sideways when zoomed in wider than the window.
+                if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::ArrowRight)) {
+                    s.by(vec2(s.step().x, 0.0));
+                }
+                if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::ArrowLeft)) {
+                    s.by(vec2(-s.step().x, 0.0));
+                }
                 if (pressed(Key::PageDown) || pressed(Key::ArrowRight) || pressed(Key::Space)) && pdf.page < pdf.pages {
                     pdf.page += 1;
                 }
@@ -414,6 +503,33 @@ impl Lister {
                 }
                 if pressed(Key::End) {
                     pdf.page = pdf.pages;
+                }
+                // A new page starts at its top (unless ↑ asked for its bottom).
+                if pdf.page != page && s.want.is_none_or(|w| w.y != f32::MAX) {
+                    s.want = Some(vec2(s.offset.x, 0.0));
+                }
+            }
+            // A zoomed picture: the arrows move around it, PgUp/PgDn a screenful.
+            Content::Image { .. } if self.zoom.is_some() => {
+                let s = &mut self.scroll;
+                let (step, screen) = (s.step(), s.screen());
+                for (key, d) in [
+                    (Key::ArrowDown, vec2(0.0, step.y)),
+                    (Key::ArrowUp, vec2(0.0, -step.y)),
+                    (Key::ArrowRight, vec2(step.x, 0.0)),
+                    (Key::ArrowLeft, vec2(-step.x, 0.0)),
+                    (Key::PageDown, vec2(0.0, screen.y)),
+                    (Key::PageUp, vec2(0.0, -screen.y)),
+                ] {
+                    if pressed(key) {
+                        s.by(d);
+                    }
+                }
+                if pressed(Key::Home) {
+                    s.want = Some(Vec2::ZERO);
+                }
+                if pressed(Key::End) {
+                    s.want = Some(vec2(s.offset.x, f32::MAX));
                 }
             }
             Content::Text(_) | Content::Hex(..) | Content::Markdown { .. } => {
@@ -674,7 +790,7 @@ fn slice_chars(s: &str, a: usize, b: usize) -> &str {
     &s[start..end.max(start)]
 }
 
-fn image_ui(ui: &mut egui::Ui, tex: &TextureHandle, zoom: &mut Option<f32>, fit: &mut f32) {
+fn image_ui(ui: &mut egui::Ui, tex: &TextureHandle, zoom: &mut Option<f32>, fit: &mut f32, scroll: &mut Scroll) {
     let size = tex.size_vec2();
     let avail = ui.available_rect_before_wrap();
     *fit = (avail.width() / size.x).min(avail.height() / size.y).min(1.0);
@@ -692,7 +808,7 @@ fn image_ui(ui: &mut egui::Ui, tex: &TextureHandle, zoom: &mut Option<f32>, fit:
             ui.allocate_rect(avail, Sense::hover());
         }
         Some(z) => {
-            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+            scroll.show(egui::ScrollArea::both().auto_shrink([false, false]), ui, true, |ui| {
                 let want = size * z;
                 let w = want.x.max(ui.available_width());
                 let h = want.y.max(ui.available_height());
@@ -704,7 +820,7 @@ fn image_ui(ui: &mut egui::Ui, tex: &TextureHandle, zoom: &mut Option<f32>, fit:
     }
 }
 
-fn pdf_ui(ui: &mut egui::Ui, ctx: &egui::Context, pdf: &mut PdfView, path: &Path, zoom: &mut Option<f32>, fit: &mut f32) {
+fn pdf_ui(ui: &mut egui::Ui, ctx: &egui::Context, pdf: &mut PdfView, path: &Path, zoom: &mut Option<f32>, fit: &mut f32, scroll: &mut Scroll) {
     let th = theme::c();
     // Collect a finished page.
     if let Some((page, rx)) = &pdf.pending {
@@ -722,8 +838,9 @@ fn pdf_ui(ui: &mut egui::Ui, ctx: &egui::Context, pdf: &mut PdfView, path: &Path
         let (tx, rx) = mpsc::channel();
         let (p, page) = (path.to_path_buf(), pdf.page);
         let width = (ui.available_width() * ctx.pixels_per_point()).clamp(800.0, 2400.0) as u32;
+        let max_side = ctx.input(|i| i.max_texture_side) as u32;
         std::thread::spawn(move || {
-            let _ = tx.send(lister_load::render_pdf_page(&p, page, width));
+            let _ = tx.send(lister_load::render_pdf_page(&p, page, width, max_side));
         });
         pdf.pending = Some((pdf.page, rx));
     }
@@ -741,7 +858,8 @@ fn pdf_ui(ui: &mut egui::Ui, ctx: &egui::Context, pdf: &mut PdfView, path: &Path
     let avail = ui.available_width() - 24.0;
     *fit = avail / size.x;
     let scale = zoom.unwrap_or(*fit);
-    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+    // A move asked for while the next page is still rendering waits for that page.
+    scroll.show(egui::ScrollArea::both().auto_shrink([false, false]), ui, have_page, |ui| {
         let want = size * scale;
         let (outer, _) = ui.allocate_exact_size(vec2(want.x.max(ui.available_width()), want.y + 24.0), Sense::hover());
         let rect = Rect::from_min_size(pos2(outer.center().x - want.x / 2.0, outer.top() + 12.0), want);
@@ -846,3 +964,99 @@ fn media_ui(ui: &mut egui::Ui, ctx: &egui::Context, m: &mut MediaView, volume: f
     new_volume
 }
 
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    /// Draws a big picture zoomed in, `frames` times, moving by keys between frames.
+    #[test]
+    fn arrows_move_round_a_zoomed_picture() {
+        let ctx = egui::Context::default();
+        let img = ColorImage::new([400, 300], Color32::GRAY);
+        let tex = ctx.load_texture("t", img, TextureOptions::LINEAR);
+        let (mut zoom, mut fit, mut scroll) = (Some(4.0), 1.0, Scroll::default());
+        let mut frame = |scroll: &mut Scroll| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))), ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| image_ui(ui, &tex, &mut zoom, &mut fit, scroll));
+            });
+        };
+        frame(&mut scroll);
+        assert!(scroll.max.x > 0.0 && scroll.max.y > 0.0, "1600×1200 doesn't fit in 800×600");
+        assert!(scroll.at_top());
+        scroll.by(vec2(0.0, scroll.step().y));
+        scroll.by(vec2(scroll.step().x, 0.0));
+        frame(&mut scroll);
+        assert!(scroll.offset.y > 0.0 && scroll.offset.x > 0.0, "{:?}", scroll.offset);
+        scroll.want = Some(vec2(0.0, f32::MAX));
+        frame(&mut scroll);
+        frame(&mut scroll);
+        assert!(scroll.at_bottom(), "End reaches the bottom: {:?} of {:?}", scroll.offset, scroll.max);
+        scroll.by(vec2(0.0, 1e6));
+        assert!(scroll.want.unwrap().y <= scroll.max.y, "moves stay inside the picture");
+    }
+
+    /// ↓ at the bottom of a PDF page goes on to the top of the next; ↑ at the top
+    /// goes back to the bottom of the previous one.
+    #[test]
+    fn pdf_reads_straight_through() {
+        if !lister_load::have("pdftoppm") || !lister_load::have("magick") {
+            return eprintln!("skipped: needs poppler and ImageMagick");
+        }
+        let dir = std::env::temp_dir().join(format!("duopane-pdfkeys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("tall.pdf");
+        // Three tall pages: at window width each is taller than the window.
+        let ok = std::process::Command::new("magick")
+            .args(["-size", "600x1800", "xc:white", "xc:gray", "xc:white"])
+            .arg(&pdf)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return eprintln!("skipped: couldn't make a test PDF");
+        }
+        let ctx = egui::Context::default();
+        let mut l = Lister::open(&pdf, Mode::Auto, false, Vec::new());
+        let mut vol = 1.0;
+        let mut frame = |l: &mut Lister, key: Option<Key>| {
+            let events = key.map(|key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }).into_iter().collect();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 700.0))), events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                l.ui(ctx, &mut vol);
+            });
+        };
+        let page = |l: &Lister| match &l.content {
+            Content::Pdf(p) => Some((p.page, p.tex.as_ref().map(|t| t.0))),
+            _ => None,
+        };
+        // Wait until page `n` is rendered and shown (and a pending move applied).
+        let settle = |l: &mut Lister, frame: &mut dyn FnMut(&mut Lister, Option<Key>), n: usize| {
+            let t = std::time::Instant::now();
+            while page(l) != Some((n, Some(n))) || l.scroll.want.is_some() {
+                frame(l, None);
+                assert!(t.elapsed() < Duration::from_secs(20), "page {n} never showed: {:?}", page(l));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            frame(l, None);
+        };
+        settle(&mut l, &mut frame, 1);
+        assert!(l.scroll.max.y > 0.0, "the page is taller than the window");
+        // ↓ scrolls down the page, then on into page 2 at its top.
+        let mut presses = 0;
+        while page(&l).unwrap().0 == 1 {
+            frame(&mut l, Some(Key::ArrowDown));
+            frame(&mut l, None);
+            presses += 1;
+            assert!(presses < 200, "↓ never reached page 2");
+        }
+        assert!(presses > 1, "the first ↓ scrolls within the page");
+        settle(&mut l, &mut frame, 2);
+        assert!(l.scroll.at_top(), "page 2 starts at its top: {:?}", l.scroll.offset);
+        // ↑ at the top goes back to the bottom of page 1.
+        frame(&mut l, Some(Key::ArrowUp));
+        settle(&mut l, &mut frame, 1);
+        assert!(l.scroll.at_bottom(), "back on page 1 at its bottom: {:?} of {:?}", l.scroll.offset, l.scroll.max);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

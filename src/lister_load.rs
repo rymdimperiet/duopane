@@ -3,7 +3,7 @@
 use eframe::egui::{Color32, ColorImage};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -114,6 +114,11 @@ pub fn have(tool: &str) -> bool {
 }
 
 pub fn load(path: &Path, mode: Mode, dark: bool, plugins: &[ListerPlugin]) -> Loaded {
+    if path.is_dir() {
+        let mut doc = make_text(&folder_tree(path, TREE_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)), "txt", "Ctrl+F finds".into(), dark);
+        doc.kind = "Folder".into();
+        return Loaded::Text(doc);
+    }
     let e = ext(path);
     if mode == Mode::Auto {
         let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -238,6 +243,89 @@ fn expand_tabs(s: &str) -> String {
     s.trim_end_matches(['\n', '\r']).replace('\t', "    ")
 }
 
+/// The largest picture the graphics card takes (pictures are scaled down to it).
+static MAX_SIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(8192);
+
+pub fn set_max_texture_side(side: usize) {
+    MAX_SIDE.store(side.min(u32::MAX as usize) as u32, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether folder trees include hidden files (follows the panes' setting).
+static TREE_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_tree_hidden(hidden: bool) {
+    TREE_HIDDEN.store(hidden, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Stop a folder tree after this many entries (F3 on a huge folder stays quick).
+const TREE_MAX: usize = 20_000;
+
+/// Everything below `root` as a tree, like the `tree` command: folders first,
+/// sorted like the panes, with file sizes, and a total at the end.
+pub fn folder_tree(root: &Path, hidden: bool) -> String {
+    struct Walk {
+        out: String,
+        hidden: bool,
+        dirs: u64,
+        files: u64,
+        bytes: u64,
+        shown: usize,
+        cut: bool,
+    }
+    fn walk(w: &mut Walk, dir: &Path, prefix: &str) {
+        let mut entries: Vec<(String, PathBuf, std::fs::Metadata)> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .flatten()
+                .filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), e.path(), e.path().symlink_metadata().ok()?)))
+                .filter(|(n, ..)| w.hidden || !n.starts_with('.'))
+                .collect(),
+            Err(e) => {
+                w.out.push_str(&format!("{prefix}└── (can't be read: {e})\n"));
+                return;
+            }
+        };
+        entries.sort_by(|a, b| b.2.is_dir().cmp(&a.2.is_dir()).then_with(|| crate::pane::natural_cmp(&a.0, &b.0)));
+        let n = entries.len();
+        for (i, (name, path, meta)) in entries.into_iter().enumerate() {
+            if w.shown >= TREE_MAX {
+                w.cut = true;
+                return;
+            }
+            w.shown += 1;
+            let last = i + 1 == n;
+            let branch = if last { "└── " } else { "├── " };
+            if meta.file_type().is_symlink() {
+                let to = std::fs::read_link(&path).map(|t| t.display().to_string()).unwrap_or_default();
+                w.out.push_str(&format!("{prefix}{branch}{name} → {to}\n"));
+                w.files += 1;
+            } else if meta.is_dir() {
+                w.out.push_str(&format!("{prefix}{branch}{name}/\n"));
+                w.dirs += 1;
+                walk(w, &path, &format!("{prefix}{}", if last { "    " } else { "│   " }));
+                if w.cut {
+                    return;
+                }
+            } else {
+                w.out.push_str(&format!("{prefix}{branch}{name}  ({})\n", crate::pane::human_size(meta.len())));
+                w.files += 1;
+                w.bytes += meta.len();
+            }
+        }
+    }
+    let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+    let mut w = Walk { out: format!("{}/\n", name.trim_end_matches('/')), hidden, dirs: 0, files: 0, bytes: 0, shown: 0, cut: false };
+    walk(&mut w, root, "");
+    let plural = |n: u64, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+    w.out.push_str(&format!("\n{}, {}, {}", plural(w.dirs, "folder"), plural(w.files, "file"), crate::pane::human_size(w.bytes)));
+    if w.cut {
+        w.out.push_str(&format!("  (stopped after {TREE_MAX} entries; there's more)"));
+    }
+    if !hidden {
+        w.out.push_str("\nHidden files not included (Ctrl+. shows them)");
+    }
+    w.out
+}
+
 pub fn make_text(text: &str, ext: &str, note: String, dark: bool) -> TextDoc {
     use syntect::easy::HighlightLines;
     use syntect::util::LinesWithEndings;
@@ -285,7 +373,8 @@ fn load_image(path: &Path) -> Loaded {
     };
     let orig = [img.width(), img.height()];
     // Graphics cards can't hold enormous textures; scale those down for display.
-    let img = if img.width() > 8192 || img.height() > 8192 { img.thumbnail(8192, 8192) } else { img };
+    let max = MAX_SIDE.load(std::sync::atomic::Ordering::Relaxed).clamp(1024, 8192);
+    let img = if img.width() > max || img.height() > max { img.thumbnail(max, max) } else { img };
     let rgba = img.to_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
     Loaded::Image(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()), orig)
@@ -307,8 +396,10 @@ fn pdf_text(path: &Path, dark: bool) -> Loaded {
     }
 }
 
-/// Renders one PDF page (1-based) to a picture about `width` pixels wide.
-pub fn render_pdf_page(path: &Path, page: usize, width: u32) -> Result<ColorImage, String> {
+/// Renders one PDF page (1-based) about `width` pixels wide, scaled down further if
+/// a side would exceed `max_side` (the largest picture the graphics card takes:
+/// a long page, a receipt say, can otherwise be taller than that).
+pub fn render_pdf_page(path: &Path, page: usize, width: u32, max_side: u32) -> Result<ColorImage, String> {
     let n = page.to_string();
     let out = Command::new("pdftoppm")
         .args(["-f", &n, "-l", &n, "-scale-to-x", &width.to_string(), "-scale-to-y", "-1", "-png"])
@@ -318,7 +409,9 @@ pub fn render_pdf_page(path: &Path, page: usize, width: u32) -> Result<ColorImag
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    let img = image::load_from_memory(&out.stdout).map_err(|e| e.to_string())?.to_rgba8();
+    let img = image::load_from_memory(&out.stdout).map_err(|e| e.to_string())?;
+    let img = if img.width().max(img.height()) > max_side { img.thumbnail(max_side, max_side) } else { img };
+    let img = img.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     Ok(ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
 }
@@ -501,6 +594,39 @@ fn rtf_text(rtf: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folder_trees() {
+        let base = std::env::temp_dir().join(format!("duopane-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("Project");
+        std::fs::create_dir_all(root.join("src/bin")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("README.md"), vec![b'x'; 2048]).unwrap();
+        std::fs::write(root.join("src/main.rs"), b"fn main() {}").unwrap();
+        std::fs::write(root.join("src/bin/tool10.rs"), b"").unwrap();
+        std::fs::write(root.join("src/bin/tool2.rs"), b"").unwrap();
+        std::fs::write(root.join(".env"), b"secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("src/main.rs", root.join("link")).unwrap();
+        let tree = folder_tree(&root, false);
+        let expected = "Project/
+├── docs/
+├── src/
+│   ├── bin/
+│   │   ├── tool2.rs  (0 B)
+│   │   └── tool10.rs  (0 B)
+│   └── main.rs  (12 B)
+├── link → src/main.rs
+└── README.md  (2.0 KB)
+
+3 folders, 5 files, 2.0 KB
+Hidden files not included (Ctrl+. shows them)";
+        #[cfg(unix)]
+        assert_eq!(tree, expected);
+        assert!(folder_tree(&root, true).contains(".env  (6 B)"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
 
     #[test]

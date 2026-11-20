@@ -76,10 +76,12 @@ pub fn builtin() -> Vec<Command> {
         cmd!("remove_bookmark", "Remove bookmark for this folder", [], |a, _| a.remove_bookmark()),
         cmd!("home", "Go to home folder", ["Alt+Home"], |a, _| a.go_home()),
         // Same keys as Double Commander; pressing one again reverses the order.
-        cmd!("sort_name", "Sort by name", ["Ctrl+F3"], |a, _| a.sort_by(SortKey::Name)),
-        cmd!("sort_extension", "Sort by file type", ["Ctrl+F4"], |a, _| a.sort_by(SortKey::Extension)),
-        cmd!("sort_modified", "Sort by date modified", ["Ctrl+F5"], |a, _| a.sort_by(SortKey::Modified)),
-        cmd!("sort_size", "Sort by size", ["Ctrl+F6"], |a, _| a.sort_by(SortKey::Size)),
+        // Ctrl+1–4 as well as Double Commander's Ctrl+F3–F6: KDE Plasma (and others)
+        // switch virtual desktops with Ctrl+F1–F4, so those never reach the app there.
+        cmd!("sort_name", "Sort by name", ["Ctrl+1", "Ctrl+F3"], |a, _| a.sort_by(SortKey::Name)),
+        cmd!("sort_extension", "Sort by file type", ["Ctrl+2", "Ctrl+F4"], |a, _| a.sort_by(SortKey::Extension)),
+        cmd!("sort_modified", "Sort by date modified", ["Ctrl+3", "Ctrl+F5"], |a, _| a.sort_by(SortKey::Modified)),
+        cmd!("sort_size", "Sort by size", ["Ctrl+4", "Ctrl+F6"], |a, _| a.sort_by(SortKey::Size)),
         cmd!("folder_size", "Calculate size of selection", ["Ctrl+Shift+S"], |a, _| a.calculate_size()),
         cmd!("cancel_job", "Cancel the running file operation", [], |a, _| a.cancel_job()),
         cmd!("edit_settings", "Edit settings file", ["Ctrl+Comma"], |a, _| a.edit_settings()),
