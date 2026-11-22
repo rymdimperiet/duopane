@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
@@ -84,6 +84,9 @@ pub struct Pane {
     pub scroll_to_cursor: bool,
     pub scroll_offset: f32,
     pub view_height: f32,
+    /// How far each folder was scrolled when we left it, so coming back up shows
+    /// it as it was (the folder we came out of stays on the same row).
+    scroll_memory: HashMap<PathBuf, f32>,
     /// `Some(text)` while the path bar is being edited.
     pub editing_path: Option<String>,
     /// A folder still being read on another thread.
@@ -149,6 +152,7 @@ impl Pane {
             scroll_to_cursor: true,
             scroll_offset: 0.0,
             view_height: 400.0,
+            scroll_memory: HashMap::new(),
             editing_path: None,
             loading: None,
             want_cursor: None,
@@ -426,7 +430,15 @@ impl Pane {
     fn after_dir_change(&mut self, old: &Path) {
         self.selected.clear();
         self.cursor = 0;
-        self.scroll_offset = 0.0;
+        // Plenty for a session's worth of folders; start over rather than grow forever.
+        if self.scroll_memory.len() > 1000 {
+            self.scroll_memory.clear();
+        }
+        self.scroll_memory.insert(old.to_path_buf(), self.scroll_offset);
+        // Scrolled as it was when we left it. Only kept if the cursor is in view
+        // there (the list scrolls just enough otherwise), so a folder entered
+        // afresh, with the cursor at the top, still starts at the top.
+        self.scroll_offset = self.scroll_memory.get(&self.path).copied().unwrap_or(0.0);
         self.editing_path = None;
         // Coming up from a child folder? Put the cursor on it.
         if old.parent() == Some(self.path.as_path()) {

@@ -728,6 +728,51 @@ mod tests {
         frame(ctx, panes, actions, vec![]);
     }
 
+    /// Going into a folder and back out again leaves the folder on the same row
+    /// on screen, not wherever the least scrolling would put it.
+    #[test]
+    fn coming_back_up_keeps_the_folder_in_place() {
+        let base = std::env::temp_dir().join(format!("duopane-scrollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for i in 0..120 {
+            std::fs::create_dir_all(base.join(format!("folder {i:03}"))).unwrap();
+        }
+        let base = base.canonicalize().unwrap();
+        let mut panes = [Pane::new(&base, false, false, SortKey::Name, true), Pane::new(&base, false, false, SortKey::Name, true)];
+        let ctx = egui::Context::default();
+        let mut actions = Vec::new();
+        let settle = |panes: &mut [Pane; 2], actions: &mut Vec<Action>| {
+            while panes[0].is_loading() {
+                let _ = panes[0].poll_loading();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            for _ in 0..3 {
+                frame(&ctx, panes, actions, vec![]);
+            }
+        };
+        settle(&mut panes, &mut actions);
+        // Move down a screenful and a half: the cursor ends up at the bottom edge,
+        // then scroll so it sits higher up, as after paging back up a little.
+        panes[0].set_cursor(60);
+        settle(&mut panes, &mut actions);
+        panes[0].set_cursor(50);
+        settle(&mut panes, &mut actions);
+        let before = (panes[0].cursor, panes[0].scroll_offset);
+        assert!(before.1 > 0.0, "the list is scrolled");
+        let name = panes[0].entries[50].name.clone();
+        let _ = panes[0].navigate(&base.join(&name));
+        settle(&mut panes, &mut actions);
+        let _ = panes[0].go_up();
+        settle(&mut panes, &mut actions);
+        assert_eq!(panes[0].entries[panes[0].cursor].name, name, "the cursor is on the folder we left");
+        assert_eq!((panes[0].cursor, panes[0].scroll_offset), before, "and the list is scrolled as it was");
+        // A folder entered afresh still starts at the top.
+        let _ = panes[0].navigate(&base.join("folder 119"));
+        settle(&mut panes, &mut actions);
+        assert_eq!(panes[0].scroll_offset, 0.0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn drag_rows_between_panes_and_onto_folders() {
         let base = std::env::temp_dir().join(format!("duopane-dnd-{}", std::process::id()));
