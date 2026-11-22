@@ -24,7 +24,7 @@ rustfmt's default and a blanket reformat touches hundreds of places.
 `actions.rs` (what commands do), `commands.rs` (command list and default keys),
 `ui.rs` / `dialogs.rs` (drawing), `pane.rs` (one folder listing, or search
 results shown as one), `search.rs` + `search_ui.rs` (Find files), `quickview.rs`
-(Ctrl+Q),
+(Ctrl+Q), `places.rs` (Alt+F1/F2 drive menu, mounting),
 `fs_ops.rs` (background copy/move/delete/pack/unpack jobs), `archive.rs`
 (zip/tar), `lister*.rs` + `media.rs` (F3 viewer), `settings.rs`, `theme.rs`.
 

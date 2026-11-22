@@ -15,6 +15,7 @@
 //! - `rename.rs`   – batch rename patterns ([N], [E], [C], ...) and clash checks
 //! - `fuzzy.rs`    – the fuzzy matcher used by "Go to" and the command palette
 //! - `search.rs`   – finding files (plocate + a live walk); the dialog is `search_ui.rs`
+//! - `places.rs`   – the drive menu (Alt+F1 / Alt+F2): places, drives, mounting
 //! - `quickview.rs` – Quick view (Ctrl+Q): details of the item under the cursor
 //! - `native_drag.rs` – drag and drop with other apps on Wayland
 //! - `theme.rs`    – colour schemes, fonts and sizes
@@ -34,6 +35,7 @@ mod media;
 mod native_drag;
 mod fuzzy;
 mod pane;
+mod places;
 mod quickview;
 mod rename;
 mod search;

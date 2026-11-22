@@ -1,6 +1,6 @@
 //! What each command does. `commands.rs` maps names and shortcuts to these.
 
-use crate::app::{describe, plural, subdirs, tilde, App, CmdRef, InputPurpose, Modal};
+use crate::app::{describe, plural, subdirs, tilde, App, CmdRef, InputPurpose, Modal, MountJob};
 use crate::dialogs::{dir_item, PaletteItem, PaletteKind, PaletteState, PaletteTarget};
 use crate::fs_ops::{self, ConflictPolicy, JobSpec};
 use crate::pane::SortKey;
@@ -95,6 +95,111 @@ impl App {
         let folder = self.panes[self.active].real_dir();
         let d = crate::search_ui::SearchDialog::new(folder, &self.last_search, self.settings.show_hidden);
         self.modal = Some(Modal::Search(d));
+    }
+
+    /// Alt+F1 / Alt+F2: the drive menu for one pane.
+    pub fn open_places(&mut self, ctx: &egui::Context, pane: usize) {
+        let places = crate::places::gather(&self.settings.bookmarks, &self.settings.sftp_recent, &self.settings.remounts);
+        let here = [self.panes[0].real_dir(), self.panes[1].real_dir()];
+        self.modal = Some(Modal::Places(crate::places::PlacesMenu::new(pane, places, here, ctx)));
+    }
+
+    pub(crate) fn places_outcome(&mut self, o: crate::places::PlacesOutcome) {
+        use crate::places::PlacesOutcome;
+        match o {
+            PlacesOutcome::Open(pane, dir) => {
+                self.active = pane;
+                self.navigate(pane, &dir);
+            }
+            PlacesOutcome::Mount(pane, place) => {
+                if self.mount_job.is_some() {
+                    return self.set_status("Still busy with the last drive", true);
+                }
+                self.set_status(format!("Mounting {}…", place.name), false);
+                self.mount_job = Some(MountJob { pane, name: place.name.clone(), sftp: None, rx: crate::places::mount(&place) });
+            }
+            PlacesOutcome::Sftp(pane, target) => self.connect_sftp(pane, target, None),
+            PlacesOutcome::AskSftp(pane) => {
+                let last = self.settings.sftp_recent.first().cloned().unwrap_or_default();
+                let n = last.chars().count();
+                self.ask("Connect to SFTP".into(), "user@host:/folder, a Host from ~/.ssh/config, or sftp://host:port/folder", last, InputPurpose::Sftp { pane }, Some(n));
+            }
+            PlacesOutcome::ForgetMount(point) => {
+                self.settings.remounts.retain(|r| r.point != point);
+                self.dirty = true;
+                self.set_status(format!("Forgot {}", tilde(&point)), false);
+            }
+            PlacesOutcome::Forget(target) => {
+                self.settings.sftp_recent.retain(|t| *t != target);
+                self.dirty = true;
+                self.set_status(format!("Forgot {target}"), false);
+            }
+            PlacesOutcome::Unmount(place) => {
+                if self.mount_job.is_some() {
+                    return self.set_status("Still busy with the last drive", true);
+                }
+                // A pane showing the drive would keep it busy.
+                if let Some(point) = &place.path {
+                    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+                    for i in 0..2 {
+                        if self.panes[i].real_dir().starts_with(point) {
+                            self.navigate(i, &home);
+                        }
+                    }
+                }
+                self.set_status(format!("Unmounting {}…", place.name), false);
+                self.mount_job = Some(MountJob { pane: self.active, name: place.name.clone(), sftp: None, rx: crate::places::unmount(&place) });
+            }
+            PlacesOutcome::Close => {}
+        }
+    }
+
+    /// Mounts an SFTP server with sshfs; asks for a password if its keys aren't enough.
+    pub(crate) fn connect_sftp(&mut self, pane: usize, target: String, password: Option<String>) {
+        if self.mount_job.is_some() {
+            return self.set_status("Still busy with the last drive", true);
+        }
+        let name = match crate::places::Target::parse(&target) {
+            Ok(t) => t.label,
+            Err(e) => return self.set_status(e, true),
+        };
+        self.set_status(format!("Connecting to {name}…"), false);
+        let rx = crate::places::sftp_mount(&target, password);
+        self.mount_job = Some(MountJob { pane, name, sftp: Some(target), rx });
+    }
+
+    pub(crate) fn mount_done(&mut self, job: MountJob, r: Result<crate::places::Done, crate::places::MountError>) {
+        use crate::places::{Done, MountError};
+        match r {
+            Ok(Done::Mounted(dir)) => {
+                self.settings.remounts.retain(|r| r.point != dir);
+                if let Some(t) = job.sftp {
+                    // Most recent first; a handful is plenty.
+                    self.settings.sftp_recent.retain(|x| *x != t);
+                    self.settings.sftp_recent.insert(0, t);
+                    self.settings.sftp_recent.truncate(10);
+                    self.dirty = true;
+                }
+                self.active = job.pane;
+                self.navigate(job.pane, &dir);
+                self.set_status(format!("Opened {}", job.name), false);
+            }
+            Ok(Done::Unmounted(again)) => {
+                if let Some(r) = again {
+                    self.settings.remounts.retain(|x| x.point != r.point);
+                    self.settings.remounts.insert(0, r);
+                    self.settings.remounts.truncate(10);
+                    self.dirty = true;
+                }
+                self.set_status(format!("Unmounted {}", job.name), false);
+            }
+            Err(MountError::NeedsPassword) => {
+                let Some(target) = job.sftp else { return };
+                self.status = None;
+                self.ask(format!("Password for {}", job.name), "No ssh key let Duopane in. The password isn't saved.", String::new(), InputPurpose::SftpPassword { pane: job.pane, target }, None);
+            }
+            Err(MountError::Failed(e)) => self.set_status(format!("Couldn't open {}: {e}", job.name), true),
+        }
     }
 
     /// Shows `path` in its folder, with the cursor on it.
@@ -885,11 +990,17 @@ impl App {
 
     /// Called when a text dialog is confirmed.
     pub(crate) fn submit_input(&mut self, purpose: InputPurpose, text: String) {
+        // A password is taken as typed, spaces and all.
+        if let InputPurpose::SftpPassword { pane, target } = purpose {
+            return self.connect_sftp(pane, target, Some(text));
+        }
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
         }
         match purpose {
+            InputPurpose::Sftp { pane } => self.connect_sftp(pane, text, None),
+            InputPurpose::SftpPassword { .. } => {}
             InputPurpose::Rename(from) => self.rename(&from, &text),
             InputPurpose::NewFolder => {
                 let path = self.resolve_input_path(&text);

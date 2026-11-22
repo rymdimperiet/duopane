@@ -85,6 +85,10 @@ pub struct Settings {
     /// Terminal used by "Open terminal here" (F9). Empty: detect one.
     pub terminal: String,
     pub bookmarks: Vec<PathBuf>,
+    /// SFTP servers connected to from the drive menu, most recent first.
+    pub sftp_recent: Vec<String>,
+    /// Mounts Duopane unmounted, to offer mounting them again.
+    pub remounts: Vec<crate::places::Remount>,
     /// Masks used with "Select by mask" (numpad +), most recent first.
     pub mask_history: Vec<String>,
     /// Folders you've opened and how often (used to rank "Go to").
@@ -128,6 +132,8 @@ impl Default for Settings {
             editor: String::new(),
             terminal: String::new(),
             bookmarks: Vec::new(),
+            sftp_recent: Vec::new(),
+            remounts: Vec::new(),
             mask_history: Vec::new(),
             visited: BTreeMap::new(),
             key_bindings: BTreeMap::new(),

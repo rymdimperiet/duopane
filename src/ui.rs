@@ -672,6 +672,8 @@ fn short_label(id: &str) -> Option<&'static str> {
         "delete_permanently" => "Delete",
         "pack" => "Pack",
         "unpack" => "Unpack",
+        "places_left" => "Left drive",
+        "places_right" => "Right drive",
         "open_terminal" => "Terminal",
         "quit" => "Quit",
         "appearance" => "Appearance",

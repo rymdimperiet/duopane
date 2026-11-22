@@ -36,6 +36,10 @@ fontdb = "0.23"
 ignore = "0.4"
 kamadak-exif = "0.6"
 
+[target.'cfg(unix)'.dependencies]
+# Free space for the drive menu (statvfs); already comes with the other crates.
+libc = "0.2"
+
 # Dragging files out of the window into other apps on Wayland (see src/native_drag.rs).
 # All three already come with eframe/winit; these lines only let Duopane use them.
 [target.'cfg(target_os = "linux")'.dependencies]

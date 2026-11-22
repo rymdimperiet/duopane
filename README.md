@@ -62,6 +62,7 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Numpad − | Deselect by mask |
 | Numpad * | Invert the selection |
 | Tab | Switch to the other pane |
+| Alt+F1 / Alt+F2 | **Drive menu** for the left / right pane: home, bookmarks, drives, drives to mount, and SFTP servers (see below) |
 | Ctrl+P | **Go to** a folder: type part of its name, or a path like `~/Doc` (Tab completes) |
 | Ctrl+Shift+P | **Command palette**: every command, searchable |
 | Ctrl+F or Alt+F7 | **Find files** by name (see below) |
@@ -171,6 +172,44 @@ it), its index gives results in a moment, while Duopane also looks through the
 folder itself for anything newer than the index. "Everywhere" uses the index
 alone and says how old it is. Hidden files are searched when they're shown
 (Ctrl+.).
+
+## Drives and places (Alt+F1 / Alt+F2)
+
+Where the old commanders let you pick a drive letter, Duopane lists:
+
+- **Places:** home, the root folder and the trash, plus your bookmarks (Ctrl+B).
+- **Drives:** everything mounted that you'd want to open: other disks, USB
+  sticks, network shares and FUSE mounts such as sshfs or rclone. The system's
+  own partitions (and btrfs subvolumes) are left out. Each shows its free space.
+- **Not mounted:** drives that are plugged in but not mounted yet. Enter mounts
+  one (with `udisksctl`, as the desktop does) and opens it. Mounts that are
+  down show here too, so you can bring them back: rclone or sshfs mounts run by
+  a systemd user service (Enter starts the service; unmounting stops it), and
+  FUSE mounts that Duopane unmounted (it remembers the command that mounted
+  them and runs it again; Delete forgets one).
+
+- **Network:** SFTP servers you've connected to before, and the hosts in
+  `~/.ssh/config`. **Connect to SFTP…** takes `user@host:/folder`, a host name
+  from your ssh config, or `sftp://host:2222/folder`.
+
+Up/Down and Enter pick, a letter jumps to the next name starting with it,
+Left/Right move the menu to the other pane, and Delete unmounts a USB stick or
+your own FUSE mount (on a recent server: forgets it). A mark shows which place
+each pane is in.
+
+SFTP servers are mounted with `sshfs` (install it from your distribution)
+under `~/.cache/duopane/mounts/`, so they work like any other folder: copy,
+Quick view and search all work there. Your ssh keys and ssh agent are used
+first; if they don't let you in, Duopane asks for the password, which it
+never saves. As with ssh, a server you've never connected to before is
+remembered the first time, and Duopane refuses one whose identity has changed
+since. A connection stays up, also after Duopane closes, until you unmount it
+(Delete in the menu).
+
+Some desktops keep Alt+F1 and Alt+F2 for themselves; KDE Plasma's launcher
+widget may take Alt+F1. Free the key there (System Settings → Shortcuts), or
+use the command palette, or bind the menu to other keys (`places_left` and
+`places_right` in the settings file).
 
 ## Quick view (Ctrl+Q)
 
@@ -336,8 +375,8 @@ test suite, but expect rough edges, and please report them.
 - **Desktops:** developed on KDE Plasma (Wayland). X11 and other desktops should
   work but are less tested. On X11, dragging files to other apps goes through
   ripdrag or dragon-drop.
-- **Not there yet:** searching inside files, remote locations (SFTP and
-  the like, beyond what's mounted), and a side-by-side file comparison.
+- **Not there yet:** searching inside files, remote locations other than SFTP
+  (beyond what's already mounted), and a side-by-side file comparison.
 - **The viewer leans on other tools** for some files: poppler for PDFs, ffmpeg for video.
 
 ## How it was made

@@ -74,6 +74,10 @@ pub fn builtin() -> Vec<Command> {
         cmd!("open_terminal", "Open terminal here", ["F9"], |a, _| a.open_terminal()),
         cmd!("add_bookmark", "Bookmark this folder", ["Ctrl+B"], |a, _| a.add_bookmark()),
         cmd!("remove_bookmark", "Remove bookmark for this folder", [], |a, _| a.remove_bookmark()),
+        // The old commanders' drive menus. Some desktops take these keys (KDE's
+        // launcher widget likes Alt+F1); free them there, or rebind these.
+        cmd!("places_left", "Drives and places for the left pane…", ["Alt+F1"], |a, ctx| a.open_places(ctx, 0)),
+        cmd!("places_right", "Drives and places for the right pane…", ["Alt+F2"], |a, ctx| a.open_places(ctx, 1)),
         cmd!("home", "Go to home folder", ["Alt+Home"], |a, _| a.go_home()),
         // Same keys as Double Commander; pressing one again reverses the order.
         // Ctrl+1–4 as well as Double Commander's Ctrl+F3–F6: KDE Plasma (and others)

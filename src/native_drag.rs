@@ -35,6 +35,7 @@
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use wayland_client::backend::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
@@ -153,6 +154,9 @@ pub struct NativeDrag {
     shared: Arc<Mutex<Shared>>,
     rx: mpsc::Receiver<DragEvent>,
     paste_rx: mpsc::Receiver<()>,
+    /// Tells the dispatch thread to finish (see [`NativeDrag::shutdown`]).
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl NativeDrag {
@@ -190,11 +194,44 @@ impl NativeDrag {
         queue.roundtrip(&mut state).ok()?;
         debug!("ready: data device manager v{}, pointer: {}, keyboard: {}", manager.version(), state.pointer.is_some(), state.keyboard.is_some());
 
-        std::thread::Builder::new()
+        // Not `blocking_dispatch`: the thread must be able to stop before the
+        // window closes the connection, or it reads a closed socket and crashes.
+        // So it waits for events at most 100 ms at a time and checks `stop`.
+        let stop = Arc::new(AtomicBool::new(false));
+        let (stop2, conn2) = (stop.clone(), conn.clone());
+        let thread = std::thread::Builder::new()
             .name("wayland-drag".into())
-            .spawn(move || while queue.blocking_dispatch(&mut state).is_ok() {})
+            .spawn(move || {
+                use std::os::fd::AsRawFd;
+                while !stop2.load(Ordering::Relaxed) {
+                    if queue.dispatch_pending(&mut state).is_err() {
+                        break;
+                    }
+                    let _ = conn2.flush();
+                    let Some(guard) = queue.prepare_read() else { continue };
+                    let mut fd = libc::pollfd { fd: guard.connection_fd().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                    // SAFETY: one valid pollfd, owned by this frame.
+                    if unsafe { libc::poll(&mut fd, 1, 100) } > 0 {
+                        match guard.read() {
+                            Ok(_) => {}
+                            Err(wayland_client::backend::WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(_) => break,
+                        }
+                    }
+                    // Otherwise dropping the guard gives the read back to winit.
+                }
+            })
             .ok()?;
-        Some(NativeDrag { conn, qh, manager, device, surface, shared, rx, paste_rx })
+        Some(NativeDrag { conn, qh, manager, device, surface, shared, rx, paste_rx, stop, thread: Some(thread) })
+    }
+
+    /// Stops the dispatch thread and waits for it. Call while the window (and
+    /// its Wayland connection) still exists.
+    pub fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 
     /// True while a mouse button is held over the window (a drag can start).

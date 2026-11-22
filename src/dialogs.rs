@@ -1,7 +1,7 @@
 //! Pop-up dialogs: text input, confirmations, messages and the
 //! searchable list used by "Go to" and the command palette.
 
-use crate::app::{expand_tilde, subdirs, tilde, Action, App, CmdRef, Modal};
+use crate::app::{expand_tilde, subdirs, tilde, Action, App, CmdRef, InputPurpose, Modal};
 use crate::fs_ops::{ConflictPolicy, FileInfo, JobSpec, Reply};
 use crate::fuzzy;
 use crate::theme;
@@ -129,9 +129,12 @@ fn enter_esc(ctx: &egui::Context) -> (bool, bool) {
 impl App {
     pub(crate) fn modal_ui(&mut self, ctx: &egui::Context) {
         let Some(mut modal) = self.modal.take() else { return };
-        // Dim the window behind the dialog.
-        ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("dim")))
-            .rect_filled(ctx.screen_rect(), 0.0, Color32::from_black_alpha(110));
+        // Dim the window behind the dialog (not behind the drive menu, which
+        // marks the panes' places and is better read next to them).
+        if !matches!(modal, Modal::Places(_)) {
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("dim")))
+                .rect_filled(ctx.screen_rect(), 0.0, Color32::from_black_alpha(110));
+        }
 
         let mut close = false;
         let mut input_ok = false;
@@ -140,9 +143,11 @@ impl App {
         let mut unpack_ok = false;
         let mut start: Option<JobSpec> = None;
         let mut pick: Option<PaletteTarget> = None;
+        let mut places_pick = None;
 
         match &mut modal {
-            Modal::Input { title, hint, text, select_chars, first, .. } => {
+            Modal::Input { title, hint, text, select_chars, first, purpose } => {
+                let password = matches!(purpose, InputPurpose::SftpPassword { .. });
                 let (enter, esc) = enter_esc(ctx);
                 input_ok = enter;
                 close = esc;
@@ -168,13 +173,14 @@ impl App {
                     ui.set_width(520.0);
                     let out = egui::TextEdit::singleline(text)
                         .id(id)
+                        .password(password)
                         .hint_text(hint.as_str())
                         .desired_width(f32::INFINITY)
                         .show(ui);
                     if !out.response.has_focus() {
                         out.response.request_focus();
                     }
-                    if !text.is_empty() {
+                    if !text.is_empty() || password {
                         ui.add_space(4.0);
                         ui.label(egui::RichText::new(hint.as_str()).color(theme::c().dim).small());
                     }
@@ -228,6 +234,15 @@ impl App {
                 } else if let Some(i) = chosen {
                     close = true;
                     start = buttons.get_mut(i).and_then(|(_, s)| s.take());
+                }
+            }
+            Modal::Places(m) => {
+                let r = self.panes_rect.unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0)));
+                // Just below the path bar, at each pane's left edge.
+                let at = [r.min + vec2(8.0, 34.0), egui::pos2(r.center().x + 8.0, r.top() + 34.0)];
+                if let Some(o) = m.ui(ctx, at) {
+                    close = true;
+                    places_pick = Some(o);
                 }
             }
             Modal::About => {
@@ -641,6 +656,9 @@ impl App {
         }
         if let Some(spec) = start {
             self.start_job(spec);
+        }
+        if let Some(o) = places_pick {
+            self.places_outcome(o);
         }
         match pick {
             Some(PaletteTarget::Cmd(c)) => self.actions.push(Action::Run(c)),

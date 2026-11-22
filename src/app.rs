@@ -36,6 +36,10 @@ pub enum InputPurpose {
     Mask { select: bool },
     /// Copy entries out of the archive being browsed.
     Extract { archive: PathBuf, items: Vec<String>, base: String },
+    /// "Connect to SFTP…" from the drive menu, for this pane.
+    Sftp { pane: usize },
+    /// The password for an SFTP server (shown as dots, never saved).
+    SftpPassword { pane: usize, target: String },
 }
 
 pub enum Modal {
@@ -72,6 +76,18 @@ pub enum Modal {
     Search(crate::search_ui::SearchDialog),
     /// About Duopane (Shift+F1).
     About,
+    /// The drive menu (Alt+F1 / Alt+F2).
+    Places(crate::places::PlacesMenu),
+}
+
+/// Mounting or unmounting in the background (see `places.rs`).
+pub(crate) struct MountJob {
+    /// The pane to open it in.
+    pub pane: usize,
+    pub name: String,
+    /// The SFTP server, as typed (to remember it, or to ask for a password).
+    pub sftp: Option<String>,
+    pub rx: crate::places::MountAnswer,
 }
 
 /// Files on Duopane's clipboard, and whether they were cut (to be moved).
@@ -105,6 +121,8 @@ pub struct App {
     title: String,
     pub(crate) actions: Vec<Action>,
     pub(crate) size_rx: Option<mpsc::Receiver<(usize, u64)>>,
+    /// A drive being mounted or unmounted, or an SFTP server being connected.
+    pub(crate) mount_job: Option<MountJob>,
     /// The F3 viewer, when open (it takes over the window).
     pub(crate) lister: Option<crate::lister::Lister>,
     /// The last batch rename: folder and (new name, old name) pairs, for undo.
@@ -174,6 +192,7 @@ impl App {
             title: String::new(),
             actions: Vec::new(),
             size_rx: None,
+            mount_job: None,
             lister: None,
             last_batch: None,
             panes_rect: None,
@@ -374,6 +393,11 @@ impl App {
             if let Ok((n, bytes)) = rx.try_recv() {
                 self.size_rx = None;
                 self.set_status(format!("{}: {}", plural(n, "item"), human_size(bytes)), false);
+            }
+        }
+        if let Some(r) = self.mount_job.as_ref().and_then(|j| j.rx.try_recv().ok()) {
+            if let Some(job) = self.mount_job.take() {
+                self.mount_done(job, r);
             }
         }
         for i in 0..2 {
@@ -653,6 +677,15 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Runs while the window still exists: the Wayland thread has to finish (and
+    /// its objects go) before winit closes the connection they use.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        #[cfg(target_os = "linux")]
+        if let Some(mut nd) = self.native_drag.take() {
+            nd.shutdown();
+        }
+    }
+
     /// While the desktop runs a drag, the window gets no pointer events; the
     /// drag's own events are turned into them here, so egui sees the drag move
     /// over the panes and be dropped (or end elsewhere) as if it were its own.
