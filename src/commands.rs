@@ -82,12 +82,18 @@ pub fn builtin() -> Vec<Command> {
         cmd!("places_right", "Drives and places for the right pane…", ["Alt+F2"], |a, ctx| a.open_places(ctx, 1)),
         cmd!("home", "Go to home folder", ["Alt+Home"], |a, _| a.go_home()),
         // Same keys as Double Commander; pressing one again reverses the order.
-        // Ctrl+1–4 as well as Double Commander's Ctrl+F3–F6: KDE Plasma (and others)
-        // switch virtual desktops with Ctrl+F1–F4, so those never reach the app there.
-        cmd!("sort_name", "Sort by name", ["Ctrl+1", "Ctrl+F3"], |a, _| a.sort_by(SortKey::Name)),
-        cmd!("sort_extension", "Sort by file type", ["Ctrl+2", "Ctrl+F4"], |a, _| a.sort_by(SortKey::Extension)),
-        cmd!("sort_modified", "Sort by date modified", ["Ctrl+3", "Ctrl+F5"], |a, _| a.sort_by(SortKey::Modified)),
-        cmd!("sort_size", "Sort by size", ["Ctrl+4", "Ctrl+F6"], |a, _| a.sort_by(SortKey::Size)),
+        // Ctrl+3–6 as well as Double Commander's Ctrl+F3–F6 (same numbers): KDE Plasma
+        // (and others) switch virtual desktops with Ctrl+F1–F4, so those never reach
+        // the app there. The second sort adds Shift (not Alt: Ctrl+Alt+F-keys switch
+        // to the text consoles on Linux).
+        cmd!("sort_name", "Sort by name", ["Ctrl+3", "Ctrl+F3"], |a, _| a.sort_by(SortKey::Name)),
+        cmd!("sort_extension", "Sort by file type", ["Ctrl+4", "Ctrl+F4"], |a, _| a.sort_by(SortKey::Extension)),
+        cmd!("sort_modified", "Sort by date modified", ["Ctrl+5", "Ctrl+F5"], |a, _| a.sort_by(SortKey::Modified)),
+        cmd!("sort_size", "Sort by size", ["Ctrl+6", "Ctrl+F6"], |a, _| a.sort_by(SortKey::Size)),
+        cmd!("then_sort_name", "Then sort by name (second sort)", ["Ctrl+Shift+3", "Ctrl+Shift+F3"], |a, _| a.then_sort_by(SortKey::Name)),
+        cmd!("then_sort_extension", "Then sort by file type (second sort)", ["Ctrl+Shift+4", "Ctrl+Shift+F4"], |a, _| a.then_sort_by(SortKey::Extension)),
+        cmd!("then_sort_modified", "Then sort by date modified (second sort)", ["Ctrl+Shift+5", "Ctrl+Shift+F5"], |a, _| a.then_sort_by(SortKey::Modified)),
+        cmd!("then_sort_size", "Then sort by size (second sort)", ["Ctrl+Shift+6", "Ctrl+Shift+F6"], |a, _| a.then_sort_by(SortKey::Size)),
         cmd!("folder_size", "Calculate size of selection", ["Ctrl+Shift+S"], |a, _| a.calculate_size()),
         cmd!("cancel_job", "Cancel the running file operation", [], |a, _| a.cancel_job()),
         cmd!("edit_settings", "Edit settings file", ["Ctrl+Comma"], |a, _| a.edit_settings()),
@@ -206,6 +212,8 @@ mod tests {
         assert_eq!(Shortcut::parse("Ctrl+.").unwrap().key, Key::Period);
         assert_eq!(Shortcut::parse("Alt+Left").unwrap().key, Key::ArrowLeft);
         assert_eq!(Shortcut::parse("Ctrl+Period").unwrap().label(), "Ctrl+.");
+        let s = Shortcut::parse("Ctrl+Alt+4").unwrap();
+        assert_eq!((s.key, s.label().as_str()), (Key::Num4, "Ctrl+Alt+4"));
     }
 
     #[test]

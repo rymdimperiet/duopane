@@ -59,12 +59,15 @@ impl App {
         use crate::app::CmdRef;
         use crate::commands::Shortcut;
         use egui::Key;
-        const F_KEYS: [Key; 12] =
-            [Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F10, Key::F11, Key::F12];
+        // F-keys, then number keys for commands no F-key has.
+        const KEYS: [Key; 22] = [
+            Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F10, Key::F11, Key::F12,
+            Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0,
+        ];
         let mut entries: Vec<(String, String, CmdRef)> = Vec::new();
-        for key in F_KEYS {
+        for key in KEYS {
             let sc = Shortcut::from_event(key, m);
-            if let Some(&cmd) = self.bindings.get(&sc) {
+            if let Some(&cmd) = self.bindings.get(&sc).filter(|c| !entries.iter().any(|e| e.2 == **c)) {
                 let label = match cmd {
                     CmdRef::Builtin(i) => short_label(self.commands[i].id).map(str::to_string).unwrap_or_else(|| {
                         self.commands[i].title.trim_end_matches('…').to_string()
@@ -77,7 +80,7 @@ impl App {
         let empty = entries.is_empty().then(|| {
             let held = Shortcut { key: Key::F1, ctrl: m.ctrl || m.command, shift: m.shift, alt: m.alt }.label();
             let held = held.trim_end_matches("F1").trim_end_matches('+').to_string();
-            format!("No F-key commands with {held}")
+            format!("No commands on F-keys or numbers with {held}")
         });
         let entries = entries.into_iter().map(|(k, label, cmd)| (k, label, Action::Run(cmd))).collect();
         self.key_row(ui, entries, empty);
@@ -91,27 +94,41 @@ impl App {
         let body = egui::TextStyle::Body.resolve(ui.style());
         let gap = ui.spacing().item_spacing.x;
         let pad = ui.spacing().button_padding.x * 2.0;
-        let width = |ui: &egui::Ui, t: &str, f: &FontId| ui.fonts(|fo| fo.layout_no_wrap(t.to_string(), f.clone(), Color32::WHITE).size().x);
+        let width = |ui: &egui::Ui, t: &str, f: &FontId| width_height(ui, t, f).0;
         let more_w = width(ui, "…", &body) + gap + 4.0;
+        // As tall as the buttons, also when there are none, so the panes above
+        // don't move when a modifier key changes what the bar shows.
+        let height = ui.spacing().interact_size.y.max(width_height(ui, "Copy", &body).1);
+        // A newer version shows at the right end.
+        let update = self.update.as_ref().map(|u| (format!("Duopane {} is out", u.version), u.url.clone()));
+        let update_w = update.as_ref().map_or(0.0, |(t, _)| width(ui, t, &body) + pad + gap * 2.0);
         ui.horizontal(|ui| {
-            ui.set_min_height(ui.spacing().interact_size.y);
+            ui.set_min_height(height);
             if let Some(msg) = empty {
                 ui.label(egui::RichText::new(msg).color(th.dim).small());
-                return;
+            } else {
+                let n = entries.len();
+                for (i, (k, label, action)) in entries.into_iter().enumerate() {
+                    let w = width(ui, &k, &small) + width(ui, &label, &body) + pad + gap * 3.0 + 8.0;
+                    let reserve = if i + 1 < n { more_w } else { 0.0 } + update_w;
+                    if w + reserve > ui.available_width() {
+                        ui.label(egui::RichText::new("…").color(th.dim));
+                        break;
+                    }
+                    ui.label(egui::RichText::new(k).color(th.dim).small());
+                    if ui.add(egui::Button::new(label).small()).clicked() {
+                        self.actions.push(action);
+                    }
+                    ui.add_space(8.0);
+                }
             }
-            let n = entries.len();
-            for (i, (k, label, action)) in entries.into_iter().enumerate() {
-                let w = width(ui, &k, &small) + width(ui, &label, &body) + pad + gap * 3.0 + 8.0;
-                let reserve = if i + 1 < n { more_w } else { 0.0 };
-                if w + reserve > ui.available_width() {
-                    ui.label(egui::RichText::new("…").color(th.dim));
-                    break;
-                }
-                ui.label(egui::RichText::new(k).color(th.dim).small());
-                if ui.add(egui::Button::new(label).small()).clicked() {
-                    self.actions.push(action);
-                }
-                ui.add_space(8.0);
+            if let Some((text, url)) = &update {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let b = egui::Button::new(egui::RichText::new(text).color(th.accent)).small();
+                    if ui.add(b).on_hover_text("A newer version is available: open its download page").clicked() {
+                        let _ = open::that_detached(url);
+                    }
+                });
             }
         });
     }
@@ -229,22 +246,46 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
             (cols.2, SortKey::Modified, "Modified", false),
         ] {
             let r = ui.interact(rect, egui::Id::new(("head", idx, label)), Sense::click());
-            let sorted = pane.sort == key || (left && pane.sort == SortKey::Extension);
-            // Leave room on the right of right-aligned labels for the sort arrow.
+            // The Name column also stands for "type" (sorting by type keeps names in view).
+            let here = |k: SortKey| k == key || (left && k == SortKey::Extension);
+            let sorted = here(pane.sort);
+            let second = pane.then.filter(|(k, _)| !sorted && here(*k));
+            // Leave room on the right of right-aligned labels for the sort arrow (and the "2").
             let (x, align) = if left {
                 (rect.left() + name_indent(body_size), Align2::LEFT_CENTER)
             } else {
-                (rect.right() - if sorted { 16.0 } else { 4.0 }, Align2::RIGHT_CENTER)
+                (rect.right() - if sorted { 16.0 } else if second.is_some() { 26.0 } else { 4.0 }, Align2::RIGHT_CENTER)
             };
             let color = if r.hovered() || sorted { theme::c().text } else { theme::c().dim };
-            let shown = if left && pane.sort == SortKey::Extension { "Name (by type)" } else { label };
+            let shown = match (left, pane.sort, pane.then) {
+                (true, SortKey::Extension, _) => "Name (by type)",
+                (true, _, Some((SortKey::Extension, _))) => "Name (then type)",
+                _ => label,
+            };
             let text_rect = ui.painter().text(pos2(x, rect.center().y), align, shown, small.clone(), color);
+            let arrow_at = pos2(text_rect.right() + 8.0, rect.center().y);
             if sorted {
-                sort_arrow(ui.painter(), pos2(text_rect.right() + 8.0, rect.center().y), pane.ascending, color);
+                sort_arrow(ui.painter(), arrow_at, pane.ascending, color);
+            } else if let Some((_, up)) = second {
+                // The second sort: a dimmer arrow with a small 2.
+                let dim = theme::c().dim;
+                sort_arrow(ui.painter(), arrow_at, up, dim);
+                let tiny = FontId::proportional(small.size * 0.75);
+                ui.painter().text(arrow_at + vec2(5.0, -2.0), Align2::LEFT_CENTER, "2", tiny, dim);
             }
+            let r = r.on_hover_text("Click to sort by this, again to reverse. Ctrl+click: sort by this second.");
             if r.clicked() {
-                pane.set_sort(key);
                 actions.push(Action::Activate(idx));
+                if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+                    actions.push(Action::RunId(match key {
+                        SortKey::Name => "then_sort_name",
+                        SortKey::Size => "then_sort_size",
+                        SortKey::Modified => "then_sort_modified",
+                        SortKey::Extension => "then_sort_extension",
+                    }));
+                } else {
+                    pane.set_sort(key);
+                }
             }
         }
         ui.painter().hline(head_rect.x_range(), head_rect.bottom(), Stroke::new(1.0_f32, theme::c().border));
@@ -590,6 +631,12 @@ fn row_ui(
     });
 }
 
+/// The size of a line of text (a small button is exactly this tall).
+fn width_height(ui: &egui::Ui, text: &str, font: &FontId) -> (f32, f32) {
+    let s = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size());
+    (s.x, s.y)
+}
+
 /// Shortens a name to fit `max_w`, cutting the start of the name so the end and the
 /// extension stay visible ("holiday-pho…summer.jpg"). Returns (text, was shortened).
 pub(crate) fn fit_name(ui: &egui::Ui, name: &str, suffix: &str, is_dir: bool, max_w: f32, font: &FontId) -> (String, bool) {
@@ -714,6 +761,10 @@ fn short_label(id: &str) -> Option<&'static str> {
         "sort_extension" => "Sort: type",
         "sort_modified" => "Sort: date",
         "sort_size" => "Sort: size",
+        "then_sort_name" => "Then: name",
+        "then_sort_extension" => "Then: type",
+        "then_sort_modified" => "Then: date",
+        "then_sort_size" => "Then: size",
         _ => return None,
     })
 }

@@ -633,6 +633,18 @@ impl App {
         self.dirty = true;
     }
 
+    /// Ctrl+Shift+3–6 / F3–F6: the second sort, for entries the first one calls equal.
+    pub fn then_sort_by(&mut self, key: SortKey) {
+        let pane = &mut self.panes[self.active];
+        if pane.sort == key {
+            return self.set_status(format!("Already sorted by {} first", key.noun()), false);
+        }
+        pane.set_then_sort(key);
+        let text = pane.sort_description();
+        self.set_status(text, false);
+        self.dirty = true;
+    }
+
     pub fn copy_paths(&mut self, ctx: &egui::Context) {
         let targets = self.panes[self.active].targets();
         if targets.is_empty() {

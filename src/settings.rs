@@ -52,6 +52,9 @@ pub struct Settings {
     pub left_ascending: bool,
     pub right_sort: SortKey,
     pub right_ascending: bool,
+    /// Second sorts (Ctrl+Shift+3–6), and whether they run ascending.
+    pub left_then: Option<(SortKey, bool)>,
+    pub right_then: Option<(SortKey, bool)>,
     pub font_size: f32,
     /// Colour scheme name (see theme.rs), e.g. "Duopane Dark", "Nord".
     pub color_scheme: String,
@@ -87,6 +90,11 @@ pub struct Settings {
     pub bookmarks: Vec<PathBuf>,
     /// SFTP servers connected to from the drive menu, most recent first.
     pub sftp_recent: Vec<String>,
+    /// Ask GitHub about once a day whether a newer Duopane is out (see update.rs).
+    pub check_for_updates: bool,
+    /// When that was last asked (seconds since 1970), and the newest version it found.
+    pub last_update_check: Option<i64>,
+    pub newest_release: Option<String>,
     /// Mounts Duopane unmounted, to offer mounting them again.
     pub remounts: Vec<crate::places::Remount>,
     /// Masks used with "Select by mask" (numpad +), most recent first.
@@ -114,6 +122,8 @@ impl Default for Settings {
             left_ascending: true,
             right_sort: SortKey::Name,
             right_ascending: true,
+            left_then: None,
+            right_then: None,
             font_size: 14.0,
             color_scheme: "Duopane Dark".into(),
             custom_colors: BTreeMap::new(),
@@ -133,6 +143,9 @@ impl Default for Settings {
             terminal: String::new(),
             bookmarks: Vec::new(),
             sftp_recent: Vec::new(),
+            check_for_updates: true,
+            last_update_check: None,
+            newest_release: None,
             remounts: Vec::new(),
             mask_history: Vec::new(),
             visited: BTreeMap::new(),

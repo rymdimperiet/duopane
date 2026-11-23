@@ -22,6 +22,30 @@ pub enum SortKey {
     Extension,
 }
 
+impl SortKey {
+    /// For messages: "Sorted by type, then size".
+    pub fn noun(self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::Size => "size",
+            SortKey::Modified => "date",
+            SortKey::Extension => "type",
+        }
+    }
+
+    /// Which way an order runs, in words: "largest first".
+    pub fn direction(self, ascending: bool) -> &'static str {
+        match (self, ascending) {
+            (SortKey::Size, true) => "smallest first",
+            (SortKey::Size, false) => "largest first",
+            (SortKey::Modified, true) => "oldest first",
+            (SortKey::Modified, false) => "newest first",
+            (_, true) => "A to Z",
+            (_, false) => "Z to A",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub name: String,
@@ -72,6 +96,9 @@ pub struct Pane {
     pub selected: HashSet<String>,
     pub sort: SortKey,
     pub ascending: bool,
+    /// A second sort for entries the first one calls equal (e.g. type, then size),
+    /// and whether it runs ascending. Names settle whatever is still equal.
+    pub then: Option<(SortKey, bool)>,
     pub show_hidden: bool,
     /// Show a ".." row at the top of every folder but the root.
     pub show_dotdot: bool,
@@ -144,6 +171,7 @@ impl Pane {
             selected: HashSet::new(),
             sort,
             ascending,
+            then: None,
             show_hidden,
             show_dotdot,
             back: Vec::new(),
@@ -344,25 +372,23 @@ impl Pane {
             .filter(|e| show_hidden || !e.is_hidden())
             .cloned()
             .collect();
-        let (key, asc) = (self.sort, self.ascending);
+        let (key, asc, then) = (self.sort, self.ascending, self.then);
+        let by = |key: SortKey, asc: bool, a: &Entry, b: &Entry| {
+            let ord = match key {
+                SortKey::Name => natural_cmp(&a.name, &b.name),
+                SortKey::Size => a.size.cmp(&b.size),
+                SortKey::Modified => a.modified.cmp(&b.modified),
+                SortKey::Extension => a.extension().cmp(&b.extension()),
+            };
+            if asc { ord } else { ord.reverse() }
+        };
         entries.sort_by(|a, b| {
             // Folders always come first.
-            b.is_dir.cmp(&a.is_dir).then_with(|| {
-                let ord = match key {
-                    SortKey::Name => natural_cmp(&a.name, &b.name),
-                    SortKey::Size => a.size.cmp(&b.size).then_with(|| natural_cmp(&a.name, &b.name)),
-                    SortKey::Modified => a.modified.cmp(&b.modified).then_with(|| natural_cmp(&a.name, &b.name)),
-                    SortKey::Extension => a
-                        .extension()
-                        .cmp(&b.extension())
-                        .then_with(|| natural_cmp(&a.name, &b.name)),
-                };
-                if asc {
-                    ord
-                } else {
-                    ord.reverse()
-                }
-            })
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| by(key, asc, a, b))
+                .then_with(|| then.map_or(std::cmp::Ordering::Equal, |(k, up)| by(k, up, a, b)))
+                .then_with(|| by(SortKey::Name, asc, a, b))
         });
         // In search results, ".." leads back to the folder that was searched.
         let up = if self.results.is_some() { Some(self.path.as_path()) } else { self.path.parent() };
@@ -408,8 +434,34 @@ impl Pane {
             self.sort = key;
             self.ascending = true;
         }
+        // A second sort by the same thing would do nothing.
+        if self.then.is_some_and(|(k, _)| k == key) {
+            self.then = None;
+        }
         self.apply_view();
         self.scroll_to_cursor = true;
+    }
+
+    /// Sets the second sort: first ascending, then reversed, then off. Picking
+    /// what the list is already sorted by turns it off.
+    pub fn set_then_sort(&mut self, key: SortKey) {
+        self.then = match self.then {
+            _ if key == self.sort => None,
+            Some((k, true)) if k == key => Some((key, false)),
+            Some((k, false)) if k == key => None,
+            _ => Some((key, true)),
+        };
+        self.apply_view();
+        self.scroll_to_cursor = true;
+    }
+
+    /// The order in words, e.g. "Sorted by type (A to Z), then size (largest first)".
+    pub fn sort_description(&self) -> String {
+        let mut s = format!("Sorted by {} ({})", self.sort.noun(), self.sort.direction(self.ascending));
+        if let Some((k, up)) = self.then {
+            s.push_str(&format!(", then {} ({})", k.noun(), k.direction(up)));
+        }
+        s
     }
 
     pub fn set_show_hidden(&mut self, show: bool) {
@@ -965,6 +1017,37 @@ mod tests {
         let m = Mask::parse("| *.tmp");
         assert!(m.matches("a.txt", false));
         assert!(!m.matches("a.tmp", false));
+    }
+
+    #[test]
+    fn second_sort() {
+        let dir = std::env::temp_dir().join(format!("duopane-thensort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, len) in [("b.jpg", 30), ("a.jpg", 10), ("c.jpg", 20), ("z.txt", 5), ("y.txt", 50)] {
+            std::fs::write(dir.join(name), vec![0u8; len]).unwrap();
+        }
+        let mut p = Pane::new(&dir, false, false, SortKey::Name, true);
+        let names = |p: &Pane| p.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(" ");
+        p.set_sort(SortKey::Extension);
+        assert_eq!(names(&p), "a.jpg b.jpg c.jpg y.txt z.txt", "type, then name");
+        p.set_then_sort(SortKey::Size);
+        assert_eq!(names(&p), "a.jpg c.jpg b.jpg z.txt y.txt", "type, then smallest first");
+        p.set_then_sort(SortKey::Size);
+        assert_eq!(names(&p), "b.jpg c.jpg a.jpg y.txt z.txt", "type, then largest first");
+        assert_eq!(p.sort_description(), "Sorted by type (A to Z), then size (largest first)");
+        // Reversing the first sort leaves the second as it is.
+        p.set_sort(SortKey::Extension);
+        assert_eq!(names(&p), "y.txt z.txt b.jpg c.jpg a.jpg");
+        // A third press turns it off; so does sorting by the same thing first.
+        p.set_then_sort(SortKey::Size);
+        assert_eq!(p.then, None);
+        p.set_then_sort(SortKey::Size);
+        p.set_sort(SortKey::Size);
+        assert_eq!(p.then, None);
+        p.set_then_sort(SortKey::Size);
+        assert_eq!(p.then, None, "the first sort can't be the second too");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

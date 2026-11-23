@@ -21,6 +21,7 @@
 //! - `native_drag.rs` – drag and drop with other apps on Wayland
 //! - `theme.rs`    – colour schemes, fonts and sizes
 //! - `icons.rs`    – file-type icons (a few Nerd Font icons in assets/icons.ttf)
+//! - `update.rs`   – asks GitHub once a day whether a newer version is out
 //! - `filetypes.rs` – which kind a file is (picture, music, archive…), for its colour
 
 mod actions;
@@ -47,6 +48,7 @@ mod search_ui;
 mod settings;
 mod theme;
 mod ui;
+mod update;
 
 fn main() -> eframe::Result<()> {
     // Optional: `duopane <left folder> [right folder]`

@@ -80,7 +80,8 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | F4 | Edit the file |
 | F8 or Delete | Move to the trash |
 | Shift+F8 or Shift+Delete | Delete permanently |
-| Ctrl+1 / 2 / 3 / 4 (or Ctrl+F3 / F4 / F5 / F6) | Sort by name / type / date / size (press again to reverse) |
+| Ctrl+3 / 4 / 5 / 6 (or Ctrl+F3 / F4 / F5 / F6) | Sort by name / type / date / size (press again to reverse) |
+| Ctrl+Shift+3 / 4 / 5 / 6 (or Ctrl+Shift+F3 / F4 / F5 / F6), or Ctrl+click a column | Then sort by name / type / date / size, for files the first sort calls equal (e.g. type, then size). Press again to reverse, a third time to turn it off |
 | Ctrl+. or Ctrl+H | Show / hide hidden files |
 | Ctrl+L | Type a location |
 | Ctrl+B | Bookmark this folder (bookmarks rank first in Go to) |
@@ -355,6 +356,12 @@ replaced with safely quoted values:
 ```
 
 Set `"editor"` (for F4) and `"terminal"` (for F9) if you don't want the defaults.
+
+**New versions.** About once a day Duopane asks GitHub whether a newer release is
+out. If there is one, a "Duopane x.y.z is out" button shows at the right end of
+the key bar (and in the About box); it opens the download page. Nothing is
+downloaded or installed by itself, and nothing is sent but the request. Turn it
+off with `"check_for_updates": false`.
 
 ## Making it your own
 

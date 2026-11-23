@@ -125,6 +125,9 @@ pub struct App {
     pub(crate) size_rx: Option<mpsc::Receiver<(usize, u64)>>,
     /// A drive being mounted or unmounted, or an SFTP server being connected.
     pub(crate) mount_job: Option<MountJob>,
+    /// A newer release, once known (shown in the key bar and the About box).
+    pub(crate) update: Option<crate::update::Release>,
+    update_rx: Option<std::sync::mpsc::Receiver<Option<crate::update::Release>>>,
     /// The F3 viewer, when open (it takes over the window).
     pub(crate) lister: Option<crate::lister::Lister>,
     /// The last batch rename: folder and (new name, old name) pairs, for undo.
@@ -176,6 +179,13 @@ impl App {
             Pane::new(&left, settings.show_hidden, settings.show_dotdot, settings.left_sort, settings.left_ascending),
             Pane::new(&right, settings.show_hidden, settings.show_dotdot, settings.right_sort, settings.right_ascending),
         ];
+        let mut panes = panes;
+        for (p, then) in panes.iter_mut().zip([settings.left_then, settings.right_then]) {
+            if then.is_some_and(|(k, _)| k != p.sort) {
+                p.then = then;
+                p.apply_view();
+            }
+        }
         let mut app = App {
             panes,
             active: 0,
@@ -195,6 +205,8 @@ impl App {
             actions: Vec::new(),
             size_rx: None,
             mount_job: None,
+            update: None,
+            update_rx: None,
             lister: None,
             last_batch: None,
             panes_rect: None,
@@ -214,7 +226,26 @@ impl App {
         if let Some(e) = settings_error {
             app.set_status(e, true);
         }
+        app.start_update_check(&cc.egui_ctx);
         app
+    }
+
+    /// Shows what the last check found, and asks again when a day has passed.
+    fn start_update_check(&mut self, ctx: &egui::Context) {
+        use crate::update;
+        if !self.settings.check_for_updates {
+            return;
+        }
+        if let Some(v) = self.settings.newest_release.clone().filter(|v| update::is_newer(v, env!("CARGO_PKG_VERSION"))) {
+            self.update = Some(update::Release { version: v, url: update::RELEASES.into() });
+        }
+        let now = chrono::Utc::now().timestamp();
+        let due = self.settings.last_update_check.is_none_or(|t| t > now || now - t >= update::EVERY.as_secs() as i64);
+        if due {
+            self.update_rx = Some(update::check(ctx.clone()));
+            self.settings.last_update_check = Some(now);
+            self.dirty = true;
+        }
     }
 
     pub fn active_pane(&mut self) -> &mut Pane {
@@ -331,6 +362,8 @@ impl App {
         self.settings.left_ascending = self.panes[0].ascending;
         self.settings.right_sort = self.panes[1].sort;
         self.settings.right_ascending = self.panes[1].ascending;
+        self.settings.left_then = self.panes[0].then;
+        self.settings.right_then = self.panes[1].then;
     }
 
     fn save_if_dirty(&mut self) {
@@ -396,6 +429,18 @@ impl App {
                 self.size_rx = None;
                 self.set_status(format!("{}: {}", plural(n, "item"), human_size(bytes)), false);
             }
+        }
+        if let Some(found) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.update_rx = None;
+            let news = found.as_ref().is_some_and(|r| self.update.as_ref().map(|u| &u.version) != Some(&r.version));
+            if let Some(r) = &found {
+                if news {
+                    self.set_status(format!("Duopane {} is out (download it from the button at the bottom right)", r.version), false);
+                }
+            }
+            self.settings.newest_release = found.as_ref().map(|r| r.version.clone());
+            self.update = found;
+            self.dirty = true;
         }
         if let Some(r) = self.mount_job.as_ref().and_then(|j| j.rx.try_recv().ok()) {
             if let Some(job) = self.mount_job.take() {

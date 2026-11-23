@@ -260,7 +260,7 @@ impl App {
             Modal::About => {
                 let (enter, esc) = enter_esc(ctx);
                 close = enter || esc;
-                close |= about_ui(ctx);
+                close |= about_ui(ctx, self.update.as_ref());
             }
             Modal::Message { title, text } => {
                 let (enter, esc) = enter_esc(ctx);
@@ -1163,7 +1163,7 @@ const FILE_KIND_NAMES: [&str; 8] = ["Pictures", "Video", "Music", "Documents", "
 const REPOSITORY: &str = "https://github.com/rymdimperiet/duopane";
 
 /// The About box: icon, version, build details, credits. Returns true when closed.
-fn about_ui(ctx: &egui::Context) -> bool {
+fn about_ui(ctx: &egui::Context, update: Option<&crate::update::Release>) -> bool {
     let th = theme::c();
     let mut close = false;
     egui::Window::new("About Duopane")
@@ -1182,6 +1182,11 @@ fn about_ui(ctx: &egui::Context) -> bool {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("Duopane").heading().strong().color(th.text));
                 ui.label(egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(th.text));
+                if let Some(u) = update {
+                    if ui.link(format!("Version {} is out: download it", u.version)).on_hover_text(&u.url).clicked() {
+                        let _ = open::that_detached(&u.url);
+                    }
+                }
                 ui.label(egui::RichText::new("A keyboard-driven dual-pane file manager").color(th.dim));
                 ui.add_space(10.0);
                 for line in [
@@ -1336,7 +1341,7 @@ mod tests {
         // It draws, and stays open until closed.
         let ctx = egui::Context::default();
         let mut closed = true;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| closed = about_ui(ctx));
+        let _ = ctx.run(egui::RawInput::default(), |ctx| closed = about_ui(ctx, None));
         assert!(!closed);
     }
 
