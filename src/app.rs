@@ -78,6 +78,8 @@ pub enum Modal {
     About,
     /// The drive menu (Alt+F1 / Alt+F2).
     Places(crate::places::PlacesMenu),
+    /// The right-click menu opened from the keyboard (Shift+Enter), with each item's keys.
+    RowMenu { at: egui::Pos2, selected: usize, items: Vec<crate::dialogs::MenuItem> },
 }
 
 /// Mounting or unmounting in the background (see `places.rs`).

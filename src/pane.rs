@@ -82,6 +82,8 @@ pub struct Pane {
     /// Set while browsing inside an archive (the path then runs through the archive file).
     pub archive: Option<ArchiveState>,
     pub scroll_to_cursor: bool,
+    /// Where the cursor row was drawn last frame (None when scrolled out of view).
+    pub cursor_rect: Option<eframe::egui::Rect>,
     pub scroll_offset: f32,
     pub view_height: f32,
     /// How far each folder was scrolled when we left it, so coming back up shows
@@ -150,6 +152,7 @@ impl Pane {
             dir_mtime: None,
             archive: None,
             scroll_to_cursor: true,
+            cursor_rect: None,
             scroll_offset: 0.0,
             view_height: 400.0,
             scroll_memory: HashMap::new(),

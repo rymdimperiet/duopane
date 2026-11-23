@@ -16,9 +16,11 @@
 //! - `fuzzy.rs`    – the fuzzy matcher used by "Go to" and the command palette
 //! - `search.rs`   – finding files (plocate + a live walk); the dialog is `search_ui.rs`
 //! - `places.rs`   – the drive menu (Alt+F1 / Alt+F2): places, drives, mounting
+//! - `open_with.rs` – "Open with" (Ctrl+Enter): apps for a file from .desktop files and mimeapps.list
 //! - `quickview.rs` – Quick view (Ctrl+Q): details of the item under the cursor
 //! - `native_drag.rs` – drag and drop with other apps on Wayland
 //! - `theme.rs`    – colour schemes, fonts and sizes
+//! - `icons.rs`    – file-type icons (a few Nerd Font icons in assets/icons.ttf)
 //! - `filetypes.rs` – which kind a file is (picture, music, archive…), for its colour
 
 mod actions;
@@ -33,7 +35,9 @@ mod lister_load;
 mod media;
 #[cfg(target_os = "linux")]
 mod native_drag;
+mod open_with;
 mod fuzzy;
+mod icons;
 mod pane;
 mod places;
 mod quickview;

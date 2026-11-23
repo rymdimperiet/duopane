@@ -289,6 +289,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
                 ui.painter().text(pos2(rect.left() + name_indent(body_size), rect.center().y), Align2::LEFT_CENTER, msg, small.clone(), color);
                 return;
             }
+            pane.cursor_rect = None;
             for i in range {
                 row_ui(ui, pane, i, idx, active, &font, &small, &widths, row_h, actions);
             }
@@ -439,6 +440,41 @@ fn path_bar(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookma
         });
 }
 
+/// The right-click menu of a file or folder (also Shift+Enter), as command IDs and
+/// titles. "Open" names the app Enter will use.
+pub(crate) fn row_menu(name: &str, is_dir: bool, in_archive: bool) -> Vec<(&'static str, String)> {
+    let mut items = Vec::new();
+    if is_dir {
+        items.push(("open", "Open".to_string()));
+    } else if !in_archive && crate::archive::is_archive(std::path::Path::new(name)) {
+        // Enter steps inside; the archive app is one item further down.
+        items.push(("open", "Open (browse inside)".to_string()));
+        let app = crate::open_with::default_app(name, false).map_or_else(|| "the system's app".to_string(), |a| a.name.clone());
+        items.push(("open_external", format!("Open ({app})")));
+    } else {
+        items.push(("open", crate::open_with::default_app(name, false).map_or_else(|| "Open".to_string(), |a| format!("Open ({})", a.name))));
+    }
+    items.extend(ROW_MENU.iter().map(|&(id, t)| (id, t.to_string())));
+    items
+}
+
+const ROW_MENU: &[(&str, &str)] = &[
+    ("open_with", "Open with…"),
+    ("edit", "Edit"),
+    ("rename", "Rename…"),
+    ("copy", "Copy to other pane…"),
+    ("move", "Move to other pane…"),
+    ("clip_copy", "Copy"),
+    ("clip_cut", "Cut"),
+    ("clip_paste", "Paste here"),
+    ("copy_path", "Copy path"),
+    ("drag_out", "Drag to another app…"),
+    ("pack", "Pack (compress)…"),
+    ("unpack", "Unpack…"),
+    ("folder_size", "Calculate size"),
+    ("delete", "Move to trash"),
+];
+
 #[allow(clippy::too_many_arguments)]
 fn row_ui(
     ui: &mut egui::Ui,
@@ -479,8 +515,15 @@ fn row_ui(
     };
     let y = rect.center().y;
     let (c_name, c_size, c_date) = columns(rect, widths);
-    let icon = if e.is_dir { "🗀" } else { "🗋" };
-    painter.text(pos2(c_name.left() + 8.0, y), Align2::LEFT_CENTER, icon, font.clone(), color.gamma_multiply(0.8));
+    match theme::icon_font(ui.ctx(), font.size) {
+        Some(icons) => {
+            let icon = crate::icons::icon(&e.name, e.is_dir, e.executable, e.is_symlink);
+            painter.text(pos2(c_name.left() + 8.0, y), Align2::LEFT_CENTER, icon, icons, color.gamma_multiply(0.85));
+        }
+        None => {
+            painter.text(pos2(c_name.left() + 8.0, y), Align2::LEFT_CENTER, if e.is_dir { "🗀" } else { "🗋" }, font.clone(), color.gamma_multiply(0.8));
+        }
+    }
     let name_x = c_name.left() + name_indent(font.size);
     let suffix = if e.is_symlink { " ↗" } else { "" };
     let (shown, truncated) = fit_name(ui, &e.name, suffix, e.is_dir, c_name.right() - name_x - 4.0, font);
@@ -532,23 +575,13 @@ fn row_ui(
         pane.cursor = i;
         actions.push(Action::Activate(idx));
     }
+    if i == pane.cursor {
+        // Where the keyboard's menu (Shift+Enter) opens.
+        pane.cursor_rect = Some(bg.intersect(ui.clip_rect()));
+    }
     r.context_menu(|ui| {
-        for (id, title) in [
-            ("open", "Open"),
-            ("edit", "Edit"),
-            ("rename", "Rename…"),
-            ("copy", "Copy to other pane…"),
-            ("move", "Move to other pane…"),
-            ("clip_copy", "Copy"),
-            ("clip_cut", "Cut"),
-            ("clip_paste", "Paste here"),
-            ("copy_path", "Copy path"),
-            ("drag_out", "Drag to another app…"),
-            ("pack", "Pack (compress)…"),
-            ("unpack", "Unpack…"),
-            ("folder_size", "Calculate size"),
-            ("delete", "Move to trash"),
-        ] {
+        let Some(e) = pane.entries.get(i) else { return };
+        for (id, title) in row_menu(&e.name, e.is_dir, pane.archive.is_some()) {
             if ui.button(title).clicked() {
                 actions.push(Action::RunId(id));
                 ui.close_menu();
@@ -759,6 +792,7 @@ mod tests {
         settle(&mut panes, &mut actions);
         let before = (panes[0].cursor, panes[0].scroll_offset);
         assert!(before.1 > 0.0, "the list is scrolled");
+        assert!(panes[0].cursor_rect.is_some(), "the keyboard menu knows where the cursor row is");
         let name = panes[0].entries[50].name.clone();
         let _ = panes[0].navigate(&base.join(&name));
         settle(&mut panes, &mut actions);

@@ -55,7 +55,8 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Space or Insert | Select / deselect the item under the cursor |
 | Type letters | Jump to the first name that matches |
 | Enter | Open a folder or **step into an archive** (.zip, .tar, .tar.gz), or open a file with its usual app |
-| Shift+Enter | Open with the system's app (also archives) |
+| Shift+Enter, Shift+F10 | The right-click menu for the file under the cursor (shows each item's key) |
+| Ctrl+Enter | Open with… (pick an app; also in the right-click menu) |
 | Left, Alt+Left, Backspace, mouse back button | Go up to the parent folder |
 | Right, Alt+Right, mouse forward button | Go down into the folder under the cursor |
 | Numpad + | **Select by mask** (like Double Commander): `*.jpg;*.png`, `*.txt \| readme*` (after `\|` excludes), `src*/` (ending in `/` matches folders) |
@@ -211,6 +212,17 @@ widget may take Alt+F1. Free the key there (System Settings → Shortcuts), or
 use the command palette, or bind the menu to other keys (`places_left` and
 `places_right` in the settings file).
 
+## Open with (Ctrl+Enter)
+
+Lists the apps that can open the selected files (or the one under the cursor),
+taken from the same place the desktop's own "Open With" menus use: the apps'
+`.desktop` files and your choices in `mimeapps.list`. Your default app comes
+first, then the other suggestions, then every other installed app, so you can
+pick any of them. Type to search the whole list. When the files are of
+different kinds, only apps that suit all of them are suggested. A file's kind
+is read from its name, so a file without an extension usually gets no
+suggestions, just the full list.
+
 ## Quick view (Ctrl+Q)
 
 The other pane shows what the cursor is on, and follows it as you move:
@@ -295,7 +307,9 @@ interface and for the lister's monospace text, in any weight it's installed in
 much every other row stands out. Files are coloured by kind (pictures, video,
 music, documents, archives, code, programs and temporary files), in colours
 picked for each scheme to stay readable and apart from folders and the
-selection; this can be turned off. Changes apply at once. Single colours can be
+selection; this can be turned off. Each name also gets a small icon for its
+kind (PDF, spreadsheet, Rust, Python…), from a few Nerd Font icons bundled with
+Duopane, so no special font is needed. Changes apply at once. Single colours can be
 overridden in the settings file:
 
 ```json
@@ -388,3 +402,5 @@ and test it daily; most of the code was written by Claude.
 ## Licence
 
 MIT; see [LICENSE](LICENSE). Duopane was written from scratch, inspired by fman and Double Commander.
+The file-type icons come from Nerd Fonts' icon sets; see
+[assets/icons-LICENSE.txt](assets/icons-LICENSE.txt).

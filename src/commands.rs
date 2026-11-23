@@ -25,7 +25,9 @@ pub fn builtin() -> Vec<Command> {
     }
     vec![
         cmd!("open", "Open", ["Enter"], |a, ctx| a.open_cursor(ctx)),
-        cmd!("open_external", "Open with the system's app", ["Shift+Enter"], |a, _| a.open_external()),
+        cmd!("open_external", "Open with the system's app", [], |a, _| a.open_external()),
+        cmd!("row_menu", "Show the menu for the file under the cursor", ["Shift+Enter", "Shift+F10"], |a, _| a.open_row_menu()),
+        cmd!("open_with", "Open with…", ["Ctrl+Enter"], |a, _| a.open_with()),
         // Back/forward keys (and the mouse's back/forward buttons) move up and down the folder tree.
         cmd!("go_up", "Go up to the parent folder", ["Backspace", "Alt+Up", "Left", "Alt+Left"], |a, _| a.go_up()),
         cmd!("enter_folder", "Go down into the folder under the cursor", ["Right", "Alt+Right"], |a, _| a.enter_folder()),

@@ -201,7 +201,7 @@ thread_local! {
 }
 
 /// Puts the chosen system fonts first; egui's built-in fonts stay as fallback (icons, emoji).
-fn apply_fonts(ctx: &egui::Context, ui_font: FontChoice, mono_font: FontChoice) {
+pub(crate) fn apply_fonts(ctx: &egui::Context, ui_font: FontChoice, mono_font: FontChoice) {
     let key = ((ui_font.0.to_string(), ui_font.1), (mono_font.0.to_string(), mono_font.1));
     if LOADED_FONTS.with(|l| l.borrow().as_ref() == Some(&key)) {
         return;
@@ -226,8 +226,19 @@ fn apply_fonts(ctx: &egui::Context, ui_font: FontChoice, mono_font: FontChoice) 
             fonts.families.entry(family).or_default().push(slot.clone());
         }
     }
+    fonts.font_data.insert("duopane-icons".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/icons.ttf"))));
+    fonts.families.insert(FontFamily::Name(ICONS.into()), vec!["duopane-icons".into()]);
     ctx.set_fonts(fonts);
     LOADED_FONTS.with(|l| *l.borrow_mut() = Some(key));
+}
+
+const ICONS: &str = "icons";
+
+/// The font for file-type icons (see `icons.rs`), or None before the fonts are set
+/// up (bare test contexts), where asking for it would panic.
+pub fn icon_font(ctx: &egui::Context, size: f32) -> Option<FontId> {
+    let family = FontFamily::Name(ICONS.into());
+    ctx.fonts(|f| f.families().contains(&family)).then(|| FontId::new(size, family))
 }
 
 fn db() -> &'static fontdb::Database {

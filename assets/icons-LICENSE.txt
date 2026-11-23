@@ -1,0 +1,11 @@
+assets/icons.ttf holds a few icons cut from a Nerd Font (https://www.nerdfonts.com,
+MIT licence) by packaging/make-icon-font.sh. The icons themselves come from:
+
+- Font Awesome (https://fontawesome.com) - SIL Open Font License 1.1
+- Devicons (https://vorillaz.github.io/devicons) - MIT
+- Seti UI (https://github.com/jesseweed/seti-ui) - MIT
+- Octicons (https://github.com/primer/octicons) - MIT
+- Font Logos (https://github.com/lukas-w/font-logos) - Unlicense
+
+The font file was patched from Meslo LG (Apache License 2.0); none of its
+letters are included.

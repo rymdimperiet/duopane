@@ -12,12 +12,15 @@ use std::path::{Path, PathBuf};
 pub enum PaletteKind {
     Commands,
     GoTo,
+    /// "Open with" (Ctrl+Enter): apps for the files, then every other app.
+    OpenWith,
 }
 
 #[derive(Clone)]
 pub enum PaletteTarget {
     Cmd(CmdRef),
     Dir(PathBuf),
+    App(std::sync::Arc<crate::open_with::DesktopApp>, std::sync::Arc<Vec<PathBuf>>),
 }
 
 #[derive(Clone)]
@@ -36,11 +39,13 @@ pub struct PaletteState {
     first: bool,
     base: Vec<PaletteItem>,
     shown: Vec<PaletteItem>,
+    /// Hint in the empty search box, when the kind's own isn't enough.
+    pub hint: Option<String>,
 }
 
 impl PaletteState {
     pub fn new(kind: PaletteKind, base: Vec<PaletteItem>) -> Self {
-        PaletteState { kind, query: String::new(), computed_for: None, selected: 0, first: true, base, shown: Vec::new() }
+        PaletteState { kind, query: String::new(), computed_for: None, selected: 0, first: true, base, shown: Vec::new(), hint: None }
     }
 
     /// Re-ranks the list when the query changed.
@@ -55,7 +60,7 @@ impl PaletteState {
             self.shown = complete_path(&q);
             return;
         }
-        if q.is_empty() && self.kind == PaletteKind::Commands {
+        if q.is_empty() && self.kind != PaletteKind::GoTo {
             self.shown = self.base.clone();
             return;
         }
@@ -131,7 +136,7 @@ impl App {
         let Some(mut modal) = self.modal.take() else { return };
         // Dim the window behind the dialog (not behind the drive menu, which
         // marks the panes' places and is better read next to them).
-        if !matches!(modal, Modal::Places(_)) {
+        if !matches!(modal, Modal::Places(_) | Modal::RowMenu { .. }) {
             ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("dim")))
                 .rect_filled(ctx.screen_rect(), 0.0, Color32::from_black_alpha(110));
         }
@@ -243,6 +248,13 @@ impl App {
                 if let Some(o) = m.ui(ctx, at) {
                     close = true;
                     places_pick = Some(o);
+                }
+            }
+            Modal::RowMenu { at, selected, items } => {
+                let (done, chosen) = row_menu_ui(ctx, *at, selected, items);
+                close = done;
+                if let Some(id) = chosen {
+                    self.actions.push(Action::RunId(id));
                 }
             }
             Modal::About => {
@@ -663,6 +675,7 @@ impl App {
         match pick {
             Some(PaletteTarget::Cmd(c)) => self.actions.push(Action::Run(c)),
             Some(PaletteTarget::Dir(p)) => self.actions.push(Action::Navigate(self.active, p)),
+            Some(PaletteTarget::App(app, files)) => self.launch_with(&app, &files),
             None => {}
         }
     }
@@ -958,9 +971,11 @@ fn palette_ui(ctx: &egui::Context, st: &mut PaletteState) -> (bool, Option<Palet
     }
     let mut close = esc;
     let mut pick = if enter { st.shown.get(st.selected).map(|i| i.target.clone()) } else { None };
-    let hint = match st.kind {
-        PaletteKind::Commands => "Type to find a command…",
-        PaletteKind::GoTo => "Part of a folder name, or a path like ~/Documents (Tab completes)",
+    let hint = match (&st.hint, st.kind) {
+        (Some(h), _) => h.as_str(),
+        (None, PaletteKind::OpenWith) => "Type to find an app…",
+        (None, PaletteKind::Commands) => "Type to find a command…",
+        (None, PaletteKind::GoTo) => "Part of a folder name, or a path like ~/Documents (Tab completes)",
     };
     let resp = egui::Window::new("palette")
         .title_bar(false)
@@ -1064,6 +1079,83 @@ fn fit_end(ui: &egui::Ui, text: &str, max_w: f32, font: &FontId) -> String {
 }
 
 /// A searchable list of installed fonts. Returns true when the choice changed.
+/// One entry in the keyboard's row menu: the command, its title and its keys.
+pub struct MenuItem {
+    pub id: &'static str,
+    pub title: String,
+    pub keys: String,
+}
+
+/// The keyboard's version of a row's right-click menu: arrows, Enter, Esc, or the
+/// first letter of an item. Returns (close, the command chosen).
+fn row_menu_ui(ctx: &egui::Context, at: egui::Pos2, selected: &mut usize, items: &[MenuItem]) -> (bool, Option<&'static str>) {
+    let n = items.len();
+    if n == 0 {
+        return (true, None);
+    }
+    let (esc, enter, up, down, home, end, typed) = ctx.input_mut(|i| {
+        let mut k = |key| i.consume_key(Modifiers::NONE, key);
+        let keys = (k(Key::Escape), k(Key::Enter), k(Key::ArrowUp), k(Key::ArrowDown), k(Key::Home) || k(Key::PageUp), k(Key::End) || k(Key::PageDown));
+        let typed = i.events.iter().find_map(|e| match e {
+            egui::Event::Text(t) => t.chars().next(),
+            _ => None,
+        });
+        (keys.0, keys.1, keys.2, keys.3, keys.4, keys.5, typed)
+    });
+    if esc {
+        return (true, None);
+    }
+    if enter {
+        return (true, Some(items[*selected].id));
+    }
+    if down {
+        *selected = (*selected + 1) % n;
+    }
+    if up {
+        *selected = (*selected + n - 1) % n;
+    }
+    if home {
+        *selected = 0;
+    }
+    if end {
+        *selected = n - 1;
+    }
+    // A letter moves to the next item starting with it.
+    if let Some(c) = typed.filter(|c| c.is_alphanumeric()).map(|c| c.to_lowercase().next().unwrap_or(c)) {
+        let starts = |i: usize| items[i].title.to_lowercase().starts_with(c);
+        if let Some(i) = (1..=n).map(|d| (*selected + d) % n).find(|&i| starts(i)) {
+            *selected = i;
+        }
+    }
+    let th = theme::c();
+    let mut chosen = None;
+    let r = egui::Area::new(egui::Id::new("row_menu")).order(egui::Order::Foreground).fixed_pos(at).constrain(true).show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_width(340.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let font = FontId::proportional(ui.style().text_styles[&egui::TextStyle::Body].size);
+            let small = egui::TextStyle::Small.resolve(ui.style());
+            let row_h = theme::row_height(font.size);
+            for (i, item) in items.iter().enumerate() {
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                let paint = ui.painter_at(rect);
+                if i == *selected {
+                    paint.rect_filled(rect, 3.0, th.cursor);
+                } else if resp.hovered() {
+                    paint.rect_filled(rect, 3.0, th.text.gamma_multiply(0.05));
+                }
+                paint.text(pos2(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, &item.title, font.clone(), th.text);
+                paint.text(pos2(rect.right() - 8.0, rect.center().y), Align2::RIGHT_CENTER, &item.keys, small.clone(), th.dim);
+                if resp.clicked() {
+                    chosen = Some(item.id);
+                }
+            }
+        });
+    });
+    let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !r.response.rect.contains(p)));
+    (outside || chosen.is_some(), chosen)
+}
+
 /// The kinds of file as named in Appearance, in `Category::ALL` order.
 const FILE_KIND_NAMES: [&str; 8] = ["Pictures", "Video", "Music", "Documents", "Archives", "Code", "Programs", "Temporary"];
 
@@ -1193,6 +1285,31 @@ mod tests {
             frame(vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
         }
         answer
+    }
+
+    #[test]
+    fn keyboard_row_menu() {
+        let ctx = egui::Context::default();
+        let menu = crate::ui::row_menu("notes", false, false);
+        let items: Vec<MenuItem> = menu.iter().map(|(id, t)| MenuItem { id, title: t.clone(), keys: String::new() }).collect();
+        let run = |events: Vec<egui::Event>, selected: &mut usize| {
+            let mut out = (false, None);
+            let input = egui::RawInput { events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| out = row_menu_ui(ctx, egui::pos2(10.0, 10.0), selected, &items));
+            out
+        };
+        let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let mut sel = 0;
+        assert_eq!(run(vec![], &mut sel), (false, None));
+        assert_eq!(run(vec![key(Key::ArrowDown)], &mut sel), (false, None));
+        assert_eq!(run(vec![key(Key::Enter)], &mut sel), (true, Some("open_with")));
+        // Up from the top wraps to the last item; a letter jumps to the next item starting with it.
+        let mut sel = 0;
+        run(vec![key(Key::ArrowUp)], &mut sel);
+        assert_eq!(menu[sel].0, "delete");
+        run(vec![egui::Event::Text("r".into())], &mut sel);
+        assert_eq!(menu[sel].0, "rename");
+        assert_eq!(run(vec![key(Key::Escape)], &mut sel), (true, None));
     }
 
     #[test]

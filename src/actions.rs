@@ -29,7 +29,7 @@ impl App {
         }
     }
 
-    /// Shift+Enter: open with the system's app, even archives.
+    /// Open with the system's app, even archives (in the Shift+Enter menu).
     pub fn open_external(&mut self) {
         let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
         if e.is_dir {
@@ -40,17 +40,131 @@ impl App {
 
     fn open_external_entry(&mut self, e: &crate::pane::Entry) {
         let Some(path) = self.materialize(&e.path) else { return };
-        {
-            match open::that_detached(&path) {
-                Ok(()) => self.set_status(format!("Opened {}", e.name), false),
-                Err(err) => self.set_status(format!("Couldn't open {}: {err}", e.name), true),
-            }
+        // The app the menus name as "Open (…)", so what they say is what happens.
+        if let Some(app) = crate::open_with::default_app(&e.name, e.is_dir) {
+            return self.launch_with(&app, &[path]);
+        }
+        match open::that_detached(&path) {
+            Ok(()) => self.set_status(format!("Opened {}", e.name), false),
+            Err(err) => self.set_status(format!("Couldn't open {}: {err}", e.name), true),
         }
     }
 
     pub fn go_up(&mut self) {
         let r = self.panes[self.active].go_up();
         self.after_move(self.active, r);
+    }
+
+    /// The right-click menu, opened from the keyboard just below the cursor row.
+    pub fn open_row_menu(&mut self) {
+        let pane = &self.panes[self.active];
+        let Some(e) = pane.cursor_entry().filter(|e| !e.is_up()) else { return };
+        let menu = crate::ui::row_menu(&e.name, e.is_dir, pane.archive.is_some());
+        let at = match (pane.cursor_rect, self.panes_rect) {
+            (Some(r), _) => r.left_bottom() + egui::vec2(24.0, 2.0),
+            (None, Some(r)) => r.center(),
+            (None, None) => egui::pos2(100.0, 100.0),
+        };
+        let items = menu
+            .into_iter()
+            .map(|(id, title)| {
+                let keys = self.commands.iter().position(|c| c.id == id).map(|i| self.keys_for(CmdRef::Builtin(i))).unwrap_or_default();
+                crate::dialogs::MenuItem { id, title, keys }
+            })
+            .collect();
+        self.modal = Some(Modal::RowMenu { at, selected: 0, items });
+    }
+
+    /// "Open with": the apps for the selected files (or the one under the cursor),
+    /// the default first, then every other app.
+    pub fn open_with(&mut self) {
+        let pane = &self.panes[self.active];
+        let picked: Vec<(PathBuf, String, bool)> = pane
+            .targets()
+            .into_iter()
+            .map(|p| {
+                let is_dir = pane.entries.iter().find(|e| e.path == p).map_or_else(|| p.is_dir(), |e| e.is_dir);
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                (p, name, is_dir)
+            })
+            .collect();
+        if picked.is_empty() {
+            return;
+        }
+        let mut files = Vec::new();
+        for (p, _, _) in &picked {
+            let Some(real) = self.materialize(p) else { return };
+            files.push(real);
+        }
+        let types: Vec<(String, bool)> = picked.iter().map(|(_, n, d)| (n.clone(), *d)).collect();
+        let c = crate::open_with::choices(&crate::open_with::Dirs::system(), &types);
+        if c.suggested.is_empty() && c.others.is_empty() {
+            return self.set_status("Couldn't find any installed apps", true);
+        }
+        let files = std::sync::Arc::new(files);
+        let mut base = Vec::new();
+        for (i, app) in c.suggested.iter().enumerate() {
+            let detail = if i == 0 && c.has_default { "Default app" } else { "Suggested" };
+            base.push(PaletteItem { title: app.name.clone(), detail: detail.into(), target: PaletteTarget::App(app.clone(), files.clone()), boost: 1000 - i as i32 });
+        }
+        for app in &c.others {
+            base.push(PaletteItem { title: app.name.clone(), detail: String::new(), target: PaletteTarget::App(app.clone(), files.clone()), boost: 0 });
+        }
+        let what = if picked.len() == 1 { format!("\"{}\"", picked[0].1) } else { plural(picked.len(), "item") };
+        let mut st = PaletteState::new(PaletteKind::OpenWith, base);
+        st.hint = Some(format!("Open {what} with… (type to find any app)"));
+        self.modal = Some(Modal::Palette(st));
+    }
+
+    pub(crate) fn launch_with(&mut self, app: &crate::open_with::DesktopApp, files: &[PathBuf]) {
+        let dir = files.first().and_then(|f| f.parent()).map(Path::to_path_buf).unwrap_or_else(|| self.panes[self.active].real_dir());
+        for argv in crate::open_with::command_lines(app, files) {
+            let argv = if crate::open_with::needs_terminal(app) {
+                match self.in_terminal(argv) {
+                    Some(a) => a,
+                    None => return self.set_status("No terminal found; set \"terminal\" in the settings file", true),
+                }
+            } else {
+                argv
+            };
+            let mut cmd = Process::new(&argv[0]);
+            cmd.args(&argv[1..]).current_dir(&dir);
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+            if let Err(e) = cmd.spawn_reaped() {
+                return self.set_status(format!("Couldn't start {}: {e}", app.name), true);
+            }
+        }
+        self.set_status(format!("Opened with {}", app.name), false);
+    }
+
+    /// A command line wrapped to run in a terminal window (for apps marked Terminal=true).
+    fn in_terminal(&self, argv: Vec<String>) -> Option<Vec<String>> {
+        let configured = if !self.settings.terminal.trim().is_empty() {
+            Some(self.settings.terminal.clone())
+        } else {
+            std::env::var("TERMINAL").ok().filter(|t| !t.is_empty())
+        };
+        if let Some(t) = configured {
+            let script = format!("{t} -e \"$@\"");
+            return Some(["sh", "-c", &script, "sh"].iter().map(|s| s.to_string()).chain(argv).collect());
+        }
+        let (term, flag): (&str, &[&str]) = [
+            ("xdg-terminal-exec", &[][..]),
+            ("konsole", &["-e"][..]),
+            ("kgx", &["--"][..]),
+            ("gnome-terminal", &["--"][..]),
+            ("xfce4-terminal", &["-x"][..]),
+            ("kitty", &[][..]),
+            ("alacritty", &["-e"][..]),
+            ("foot", &[][..]),
+            ("wezterm", &["start", "--"][..]),
+            ("tilix", &["-e"][..]),
+            ("xterm", &["-e"][..]),
+        ]
+        .into_iter()
+        .find(|(t, _)| find_in_path(t))?;
+        Some(std::iter::once(term).chain(flag.iter().copied()).map(String::from).chain(argv).collect())
     }
 
     /// A real file for an entry: entries inside an archive are unpacked to a temporary folder.
