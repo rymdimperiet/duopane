@@ -628,8 +628,10 @@ impl Pane {
     /// See [`Mask`] for the mask syntax.
     pub fn select_by_mask(&mut self, mask: &str, on: bool) -> usize {
         let mask = Mask::parse(mask);
-        let names: Vec<String> =
-            self.entries.iter().filter(|e| !e.is_up() && mask.matches(&e.name, e.is_dir)).map(|e| e.name.clone()).collect();
+        // Selecting takes folders only with a mask ending in "/"; deselecting takes
+        // them whatever the mask, or "*" would leave selected folders behind.
+        let hit = |e: &Entry| if on { mask.matches(&e.name, e.is_dir) } else { mask.matches_any(&e.name) };
+        let names: Vec<String> = self.entries.iter().filter(|e| !e.is_up() && hit(e)).map(|e| e.name.clone()).collect();
         for n in &names {
             if on {
                 self.selected.insert(n.clone());
@@ -672,7 +674,8 @@ impl Pane {
 /// - several masks are separated by `;`, e.g. `*.jpg;*.png`
 /// - masks after `|` exclude, e.g. `*.txt | readme*`
 /// - a mask ending in `/` matches folders, e.g. `src*/`; others match files only
-///   (`*` alone, or `*.*`, therefore selects all files but no folders)
+///   (`*` alone, or `*.*`, therefore selects all files but no folders). Deselecting
+///   ignores that and takes folders too, so `*` clears a whole selection.
 pub struct Mask {
     include: Vec<(Vec<char>, bool)>,
     exclude: Vec<(Vec<char>, bool)>,
@@ -705,8 +708,17 @@ impl Mask {
     }
 
     pub fn matches(&self, name: &str, is_dir: bool) -> bool {
+        self.matches_as(name, Some(is_dir))
+    }
+
+    /// Like [`Mask::matches`], but files and folders alike (for deselecting).
+    pub fn matches_any(&self, name: &str) -> bool {
+        self.matches_as(name, None)
+    }
+
+    fn matches_as(&self, name: &str, is_dir: Option<bool>) -> bool {
         let n: Vec<char> = name.to_lowercase().chars().collect();
-        let hit = |list: &[(Vec<char>, bool)]| list.iter().any(|(p, dirs)| *dirs == is_dir && glob(p, &n));
+        let hit = |list: &[(Vec<char>, bool)]| list.iter().any(|(p, dirs)| is_dir.is_none_or(|d| *dirs == d) && glob(p, &n));
         hit(&self.include) && !hit(&self.exclude)
     }
 }
@@ -950,6 +962,27 @@ mod tests {
         let m = Mask::parse("| *.tmp");
         assert!(m.matches("a.txt", false));
         assert!(!m.matches("a.tmp", false));
+    }
+
+    #[test]
+    fn deselecting_by_mask_takes_folders_too() {
+        let dir = std::env::temp_dir().join(format!("duopane-demask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("photos")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = Pane::new(&dir, false, false, SortKey::Name, true);
+        p.select_by_mask("*", true);
+        assert_eq!(p.selected.len(), 1, "selecting * takes the files only");
+        p.select_all();
+        assert_eq!(p.selected.len(), 3);
+        p.select_by_mask("p*", false);
+        assert!(!p.selected.contains("photos"), "a folder is deselected by a plain mask");
+        p.select_by_mask("* | src", false);
+        assert_eq!(p.selected.iter().collect::<Vec<_>>(), ["src"], "exclusions still count");
+        p.select_by_mask("*", false);
+        assert!(p.selected.is_empty(), "* clears the whole selection");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

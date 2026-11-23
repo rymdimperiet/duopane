@@ -59,7 +59,7 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Left, Alt+Left, Backspace, mouse back button | Go up to the parent folder |
 | Right, Alt+Right, mouse forward button | Go down into the folder under the cursor |
 | Numpad + | **Select by mask** (like Double Commander): `*.jpg;*.png`, `*.txt \| readme*` (after `\|` excludes), `src*/` (ending in `/` matches folders) |
-| Numpad − | Deselect by mask |
+| Numpad − | Deselect by mask (folders too, so `*` clears the whole selection) |
 | Numpad * | Invert the selection |
 | Tab | Switch to the other pane |
 | Alt+F1 / Alt+F2 | **Drive menu** for the left / right pane: home, bookmarks, drives, drives to mount, and SFTP servers (see below) |
