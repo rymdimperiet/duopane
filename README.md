@@ -103,7 +103,10 @@ Hold Alt, Shift or Ctrl to see what the F-keys do with that key in the bar at
 the bottom (for example Alt: Pack and Unpack; Ctrl: the sort keys).
 
 The mouse works too: click, Ctrl+click and Shift+click select, a double-click opens,
-right-click opens a menu, and clicking a column header sorts by it.
+right-click opens a menu, and clicking a column header sorts by it. Drag the gap
+between the panes to make one wider, or the edges between the column headers to
+resize Size and Modified; a double-click puts either back, and Ctrl+double-click
+resets them all. Both are remembered.
 
 ### Drag and drop
 

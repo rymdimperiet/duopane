@@ -2,6 +2,7 @@
 
 use crate::app::{plural, Action, App};
 use crate::pane::{human_size, Pane, SortKey};
+use crate::settings::ColumnWidths;
 use crate::theme;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Sense, Stroke};
 use std::path::{Path, PathBuf};
@@ -195,29 +196,81 @@ impl App {
             .frame(egui::Frame::default().fill(theme::c().bg).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 2 }))
             .show(ctx, |ui| {
                 self.panes_rect = Some(ui.max_rect());
-                ui.spacing_mut().item_spacing.x = 6.0;
                 let active = self.active;
                 let b0 = self.settings.bookmarks.contains(&self.panes[0].path);
                 let b1 = self.settings.bookmarks.contains(&self.panes[1].path);
                 let (left, right) = self.panes.split_at_mut(1);
                 let actions = &mut self.actions;
                 let quick_view = &mut self.quick_view;
-                ui.columns(2, |cols| {
-                    let panes = [(&mut left[0], b0), (&mut right[0], b1)];
-                    for (idx, (col, (pane, bookmarked))) in cols.iter_mut().zip(panes).enumerate() {
-                        match quick_view {
-                            Some(qv) if qv.slot == idx => qv.ui(col),
-                            _ => pane_ui(col, pane, idx, active == idx, bookmarked, actions),
-                        }
+                let (split, columns) = (self.settings.pane_split, self.settings.columns);
+                let rects = pane_rects(ui.max_rect(), split);
+                let panes = [(&mut left[0], b0), (&mut right[0], b1)];
+                for (idx, (pane, bookmarked)) in panes.into_iter().enumerate() {
+                    let col = &mut ui.new_child(egui::UiBuilder::new().max_rect([rects.0, rects.2][idx]));
+                    match quick_view {
+                        Some(qv) if qv.slot == idx => qv.ui(col),
+                        _ => pane_ui(col, pane, idx, active == idx, bookmarked, &mut self.settings.columns, actions),
                     }
-                });
+                }
+                pane_divider(ui, rects.1, ui.max_rect(), &mut self.settings.pane_split, actions);
+                if self.settings.pane_split != split || self.settings.columns != columns {
+                    self.dirty = true;
+                }
             });
         drag_label(ctx);
     }
+
+    /// Which pane a point is over.
+    pub(crate) fn pane_at(&self, p: egui::Pos2) -> Option<usize> {
+        let r = self.panes_rect?;
+        Some(usize::from(p.x > pane_rects(r, self.settings.pane_split).1.center().x))
+    }
+}
+
+/// The room between the panes, which is also the handle for moving it.
+const DIVIDER: f32 = 6.0;
+/// The narrowest a pane can be made.
+const MIN_PANE: f32 = 220.0;
+
+/// The left pane, the divider and the right pane.
+pub(crate) fn pane_rects(r: egui::Rect, split: f32) -> (egui::Rect, egui::Rect, egui::Rect) {
+    let room = (r.width() - DIVIDER).max(0.0);
+    let x = (r.left() + room * split.clamp(0.0, 1.0)).round();
+    let divider = egui::Rect::from_min_max(pos2(x, r.top()), pos2(x + DIVIDER, r.bottom()));
+    (
+        egui::Rect::from_min_max(r.min, pos2(x, r.bottom())),
+        divider,
+        egui::Rect::from_min_max(pos2(x + DIVIDER, r.top()), r.max),
+    )
+}
+
+/// Dragging the gap between the panes moves it; a double click puts it back in the middle.
+/// Ctrl+double-click resets every size (the "reset_layout" command).
+fn pane_divider(ui: &mut egui::Ui, rect: egui::Rect, area: egui::Rect, split: &mut f32, actions: &mut Vec<Action>) {
+    let r = ui.interact(rect.expand2(vec2(2.0, 0.0)), egui::Id::new("pane_divider"), Sense::click_and_drag());
+    let room = (area.width() - DIVIDER).max(1.0);
+    let least = (MIN_PANE / room).min(0.5);
+    if r.dragged() {
+        if let Some(p) = r.interact_pointer_pos() {
+            *split = ((p.x - DIVIDER / 2.0 - area.left()) / room).clamp(least, 1.0 - least);
+        }
+    }
+    if r.double_clicked() {
+        if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+            actions.push(Action::RunId("reset_layout"));
+        }
+        *split = 0.5;
+    }
+    if r.hovered() || r.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        let x = rect.center().x;
+        ui.painter().vline(x, area.y_range().shrink(area.height() * 0.3), Stroke::new(2.0_f32, theme::c().dim.gamma_multiply(0.6)));
+    }
+    let _ = r.on_hover_text_at_pointer("Drag to move. Double-click: back to the middle.\nCtrl+double-click: reset the columns too.");
 }
 
 /// Draws one pane: path bar, column headers, the list and a summary line.
-fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmarked: bool, actions: &mut Vec<Action>) {
+fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmarked: bool, set: &mut ColumnWidths, actions: &mut Vec<Action>) {
     let frame = egui::Frame::default()
         .fill(theme::c().pane)
         .stroke(Stroke::new(1.0_f32, if active { theme::c().accent } else { theme::c().border }))
@@ -231,11 +284,18 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
 
         path_bar(ui, pane, idx, active, bookmarked, full_w, actions);
 
-        // Size the columns from the text they hold, so they never run into each other.
-        let widths = ui.fonts(|f| {
+        // Columns are as wide as the text they hold, unless dragged wider or narrower.
+        let (fit_size, fit_date) = ui.fonts(|f| {
             let w = |s: &str| f.layout_no_wrap(s.to_string(), small.clone(), Color32::WHITE).size().x;
-            ColWidths { size: w("888.8 MB") + 16.0, date: w("8888-88-88 88:88").max(w("Modified") + 14.0) + 28.0 }
+            (w("888.8 MB") + 16.0, w("8888-88-88 88:88").max(w("Modified") + 14.0) + 28.0)
         });
+        let date = set.date.unwrap_or(fit_date);
+        let widths = ColWidths {
+            size: set.size.unwrap_or(fit_size),
+            date,
+            // Too narrow for the time: show the day alone.
+            date_format: if date < fit_date - 16.0 { "%Y-%m-%d" } else { "%Y-%m-%d %H:%M" },
+        };
 
         // --- column headers ---
         let (head_rect, _) = ui.allocate_exact_size(vec2(full_w, theme::row_height(body_size)), Sense::hover());
@@ -262,16 +322,17 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
                 (true, _, Some((SortKey::Extension, _))) => "Name (then type)",
                 _ => label,
             };
-            let text_rect = ui.painter().text(pos2(x, rect.center().y), align, shown, small.clone(), color);
+            let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+            let text_rect = painter.text(pos2(x, rect.center().y), align, shown, small.clone(), color);
             let arrow_at = pos2(text_rect.right() + 8.0, rect.center().y);
             if sorted {
-                sort_arrow(ui.painter(), arrow_at, pane.ascending, color);
+                sort_arrow(&painter, arrow_at, pane.ascending, color);
             } else if let Some((_, up)) = second {
                 // The second sort: a dimmer arrow with a small 2.
                 let dim = theme::c().dim;
-                sort_arrow(ui.painter(), arrow_at, up, dim);
+                sort_arrow(&painter, arrow_at, up, dim);
                 let tiny = FontId::proportional(small.size * 0.75);
-                ui.painter().text(arrow_at + vec2(5.0, -2.0), Align2::LEFT_CENTER, "2", tiny, dim);
+                painter.text(arrow_at + vec2(5.0, -2.0), Align2::LEFT_CENTER, "2", tiny, dim);
             }
             let r = r.on_hover_text("Click to sort by this, again to reverse. Ctrl+click: sort by this second.");
             if r.clicked() {
@@ -288,6 +349,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
                 }
             }
         }
+        column_handles(ui, head_rect, &cols, set, idx, actions);
         ui.painter().hline(head_rect.x_range(), head_rect.bottom(), Stroke::new(1.0_f32, theme::c().border));
 
         // --- the list ---
@@ -571,12 +633,12 @@ fn row_ui(
     painter.with_clip_rect(c_name).text(pos2(name_x, y), Align2::LEFT_CENTER, shown, font.clone(), color);
     let r = if truncated { r.on_hover_text(&e.name) } else { r };
     if !e.is_dir {
-        painter.text(pos2(c_size.right() - 4.0, y), Align2::RIGHT_CENTER, human_size(e.size), small.clone(), theme::c().dim);
+        painter.with_clip_rect(c_size).text(pos2(c_size.right() - 4.0, y), Align2::RIGHT_CENTER, human_size(e.size), small.clone(), theme::c().dim);
     }
     if let Some(t) = e.modified {
         let dt: chrono::DateTime<chrono::Local> = t.into();
-        let s = dt.format("%Y-%m-%d %H:%M").to_string();
-        painter.text(pos2(c_date.right() - 4.0, y), Align2::RIGHT_CENTER, s, small.clone(), theme::c().dim);
+        let s = dt.format(widths.date_format).to_string();
+        painter.with_clip_rect(c_date).text(pos2(c_date.right() - 4.0, y), Align2::RIGHT_CENTER, s, small.clone(), theme::c().dim);
     }
 
     // Dragging a selected row takes the whole selection; any other row goes alone.
@@ -720,10 +782,54 @@ fn name_indent(font_size: f32) -> f32 {
     10.0 + font_size * 1.3
 }
 
-/// Widths of the size and date columns, measured from the current font.
+/// Widths of the size and date columns, and how dates are written.
 struct ColWidths {
     size: f32,
     date: f32,
+    date_format: &'static str,
+}
+
+/// The narrowest a column can be dragged, and the least room left for names.
+const MIN_COLUMN: f32 = 20.0;
+const MIN_NAMES: f32 = 80.0;
+
+/// The edges between the header's columns: dragging one sets the width of the
+/// column on its right (names take what's left); a double click fits it to its text.
+fn column_handles(ui: &mut egui::Ui, head: egui::Rect, cols: &(egui::Rect, egui::Rect, egui::Rect), set: &mut ColumnWidths, idx: usize, actions: &mut Vec<Action>) {
+    let right = head.right() - 6.0;
+    for (n, x) in [(0, cols.1.left()), (1, cols.2.left())] {
+        let handle = egui::Rect::from_center_size(pos2(x, head.center().y), vec2(8.0, head.height()));
+        let r = ui.interact(handle, egui::Id::new(("column_edge", idx, n)), Sense::click_and_drag());
+        let strong = r.hovered() || r.dragged();
+        let color = if strong { theme::c().text.gamma_multiply(0.6) } else { theme::c().border };
+        ui.painter().vline(x, head.y_range().shrink(head.height() * 0.25), Stroke::new(1.0_f32, color));
+        if strong {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if r.dragged() {
+            if let Some(p) = r.interact_pointer_pos() {
+                let room = right - head.left() - MIN_NAMES - 8.0;
+                if n == 0 {
+                    let most = (room - (right - cols.2.left())).max(MIN_COLUMN);
+                    set.size = Some((cols.2.left() - p.x).clamp(MIN_COLUMN, most).round());
+                } else {
+                    let most = (room - cols.1.width()).max(MIN_COLUMN);
+                    set.date = Some((right - p.x).clamp(MIN_COLUMN, most).round());
+                }
+            }
+        }
+        if r.double_clicked() {
+            if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+                actions.push(Action::RunId("reset_layout"));
+            }
+            if n == 0 {
+                set.size = None;
+            } else {
+                set.date = None;
+            }
+        }
+        let _ = r.on_hover_text_at_pointer("Drag to resize. Double-click: fit to the text.\nCtrl+double-click: reset all columns and the panes.");
+    }
 }
 
 /// Splits a row into the name, size and date columns.
@@ -790,9 +896,10 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let (l, r) = panes.split_at_mut(1);
+                let mut widths = ColumnWidths::default();
                 ui.columns(2, |cols| {
-                    pane_ui(&mut cols[0], &mut l[0], 0, true, false, actions);
-                    pane_ui(&mut cols[1], &mut r[0], 1, false, false, actions);
+                    pane_ui(&mut cols[0], &mut l[0], 0, true, false, &mut widths, actions);
+                    pane_ui(&mut cols[1], &mut r[0], 1, false, false, &mut widths, actions);
                 });
             });
             drag_label(ctx);
@@ -965,4 +1072,72 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    /// Presses at `from`, drags to `to` and lets go, one frame per step, drawing `draw` each time.
+    fn drag_across(ctx: &egui::Context, from: Pos2, to: Pos2, mut draw: impl FnMut(&mut egui::Ui)) {
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let steps = [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(from.lerp(to, 0.5))], vec![Event::PointerMoved(to)], vec![button(to, false)]];
+        for events in steps {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))), events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| draw(ui));
+            });
+        }
+    }
+
+    #[test]
+    fn moving_the_pane_divider() {
+        let ctx = egui::Context::default();
+        let area = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0));
+        let mut split = 0.5;
+        let at = pane_rects(area, split).1.center();
+        drag_across(&ctx, at, at - vec2(200.0, 0.0), |ui| pane_divider(ui, pane_rects(area, split).1, area, &mut split, &mut Vec::new()));
+        let left = pane_rects(area, split).0;
+        assert!((left.width() - 297.0).abs() < 2.0, "left pane is {}", left.width());
+        // It can't squeeze a pane to nothing.
+        let at = pane_rects(area, split).1.center();
+        drag_across(&ctx, at, pos2(5.0, at.y), |ui| pane_divider(ui, pane_rects(area, split).1, area, &mut split, &mut Vec::new()));
+        assert!(pane_rects(area, split).0.width() >= MIN_PANE - 1.0);
+    }
+
+    #[test]
+    fn dragging_column_edges() {
+        let ctx = egui::Context::default();
+        let head = Rect::from_min_size(pos2(0.0, 100.0), vec2(500.0, 20.0));
+        let mut set = ColumnWidths::default();
+        let fit = |set: &ColumnWidths| ColWidths { size: set.size.unwrap_or(70.0), date: set.date.unwrap_or(120.0), date_format: "" };
+        // The edge between names and sizes, dragged left: a wider Size column.
+        let edge = columns(head, &fit(&set)).1.left_center();
+        drag_across(&ctx, edge, edge - vec2(30.0, 0.0), |ui| column_handles(ui, head, &columns(head, &fit(&set)), &mut set, 0, &mut Vec::new()));
+        assert_eq!(set, ColumnWidths { size: Some(100.0), date: None });
+        // The edge between sizes and dates, dragged right: a narrower date column, same size column.
+        let edge = columns(head, &fit(&set)).2.left_center();
+        drag_across(&ctx, edge, edge + vec2(50.0, 0.0), |ui| column_handles(ui, head, &columns(head, &fit(&set)), &mut set, 0, &mut Vec::new()));
+        assert_eq!(set, ColumnWidths { size: Some(100.0), date: Some(70.0) });
+        // Names always keep some room.
+        let edge = columns(head, &fit(&set)).1.left_center();
+        drag_across(&ctx, edge, pos2(0.0, edge.y), |ui| column_handles(ui, head, &columns(head, &fit(&set)), &mut set, 0, &mut Vec::new()));
+        assert!(columns(head, &fit(&set)).0.width() >= MIN_NAMES);
+    }
+
+
+    #[test]
+    fn ctrl_double_click_resets_everything() {
+        let ctx = egui::Context::default();
+        let area = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0));
+        let mut split = 0.3;
+        let mut actions = Vec::new();
+        let at = pane_rects(area, split).1.center();
+        let ctrl = egui::Modifiers::CTRL;
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: ctrl };
+        for (n, events) in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], vec![button(true)], vec![button(false)]].into_iter().enumerate() {
+            let input = RawInput { screen_rect: Some(area), events, modifiers: ctrl, time: Some(n as f64 * 0.05), ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| pane_divider(ui, pane_rects(area, split).1, area, &mut split, &mut actions));
+            });
+        }
+        assert_eq!(split, 0.5);
+        assert!(matches!(actions[..], [Action::RunId("reset_layout")]));
+    }
+
 }

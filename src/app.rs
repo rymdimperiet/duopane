@@ -695,10 +695,7 @@ impl App {
         if paths.is_empty() || self.modal.is_some() {
             return;
         }
-        let to = match (pos, self.panes_rect) {
-            (Some(p), Some(r)) => usize::from(p.x > r.center().x),
-            _ => self.active,
-        };
+        let to = pos.and_then(|p| self.pane_at(p)).unwrap_or(self.active);
         let dest = self.panes[to].path.clone();
         self.actions.push(Action::Drop { from: None, to, paths, dest, mv: false });
     }

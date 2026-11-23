@@ -55,6 +55,10 @@ pub struct Settings {
     /// Second sorts (Ctrl+Shift+3–6), and whether they run ascending.
     pub left_then: Option<(SortKey, bool)>,
     pub right_then: Option<(SortKey, bool)>,
+    /// Where the panes divide, as a share of the window for the left one.
+    pub pane_split: f32,
+    /// Widths of the Size and Modified columns (dragged in the column headers).
+    pub columns: ColumnWidths,
     pub font_size: f32,
     /// Colour scheme name (see theme.rs), e.g. "Duopane Dark", "Nord".
     pub color_scheme: String,
@@ -108,6 +112,14 @@ pub struct Settings {
     pub lister_plugins: Vec<ListerPlugin>,
 }
 
+/// Column widths in points; None: just wide enough for the text.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct ColumnWidths {
+    pub size: Option<f32>,
+    pub date: Option<f32>,
+}
+
 /// The range of the "Row contrast" slider, in percent.
 pub const STRIPE_MIN: f32 = 1.0;
 pub const STRIPE_MAX: f32 = 30.0;
@@ -124,6 +136,8 @@ impl Default for Settings {
             right_ascending: true,
             left_then: None,
             right_then: None,
+            pane_split: 0.5,
+            columns: ColumnWidths::default(),
             font_size: 14.0,
             color_scheme: "Duopane Dark".into(),
             custom_colors: BTreeMap::new(),

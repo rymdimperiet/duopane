@@ -51,6 +51,12 @@ pub fn builtin() -> Vec<Command> {
             a.settings.show_key_bar = !a.settings.show_key_bar;
             a.dirty = true;
         }),
+        cmd!("reset_layout", "Reset pane and column sizes", [], |a, _| {
+            a.settings.pane_split = 0.5;
+            a.settings.columns = Default::default();
+            a.dirty = true;
+            a.set_status("Panes and columns are back to their usual sizes", false);
+        }),
         cmd!("toggle_hidden", "Show / hide hidden files", ["Ctrl+Period", "Ctrl+H"], |a, _| a.toggle_hidden()),
         cmd!("reload", "Reload both panes", ["Ctrl+R"], |a, _| a.reload_all()),
         cmd!("select_all", "Select all", ["Ctrl+A"], |a, _| a.active_pane().select_all()),

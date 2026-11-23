@@ -244,7 +244,7 @@ impl App {
             Modal::Places(m) => {
                 let r = self.panes_rect.unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0)));
                 // Just below the path bar, at each pane's left edge.
-                let at = [r.min + vec2(8.0, 34.0), egui::pos2(r.center().x + 8.0, r.top() + 34.0)];
+                let at = [r.min + vec2(8.0, 34.0), egui::pos2(crate::ui::pane_rects(r, self.settings.pane_split).2.left() + 8.0, r.top() + 34.0)];
                 if let Some(o) = m.ui(ctx, at) {
                     close = true;
                     places_pick = Some(o);
