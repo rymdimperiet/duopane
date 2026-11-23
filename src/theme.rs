@@ -218,6 +218,14 @@ fn apply_fonts(ctx: &egui::Context, ui_font: FontChoice, mono_font: FontChoice) 
             fonts.families.entry(family).or_default().insert(0, slot.into());
         }
     }
+    // Neither the chosen fonts nor egui's own cover every script, so file names in
+    // Japanese, Arabic and so on would show as empty boxes without these.
+    for (slot, fd) in fallback_fonts() {
+        fonts.font_data.insert(slot.clone(), fd.clone());
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push(slot.clone());
+        }
+    }
     ctx.set_fonts(fonts);
     LOADED_FONTS.with(|l| *l.borrow_mut() = Some(key));
 }
@@ -282,9 +290,79 @@ pub fn weight_name(w: u16) -> &'static str {
 }
 
 /// The font file for a family, as close to `weight` as it comes (upright).
+/// For each script egui can't draw on its own, the first of these fonts that is installed.
+/// Japanese variants come first among the CJK fonts; they cover Chinese and Korean too.
+const FALLBACKS: &[&[&str]] = &[
+    &["Noto Sans CJK JP", "Source Han Sans JP", "Noto Sans JP", "Source Han Sans", "Noto Sans CJK SC", "Noto Sans CJK KR", "WenQuanYi Zen Hei", "Droid Sans Fallback", "IPAGothic", "VL Gothic", "Takao Gothic", "Yu Gothic", "Meiryo", "MS Gothic", "Microsoft YaHei", "Hiragino Sans", "PingFang SC", "Arial Unicode MS"],
+    &["Noto Sans Arabic", "Noto Naskh Arabic", "DejaVu Sans", "Segoe UI", "Geeza Pro"],
+    &["Noto Sans Hebrew", "DejaVu Sans", "Segoe UI", "Arial Hebrew"],
+    &["Noto Sans Thai", "Noto Sans Thai Looped", "Leelawadee UI", "Thonburi"],
+    &["Noto Sans Devanagari", "Nirmala UI", "Kohinoor Devanagari"],
+    &["Noto Sans Symbols 2", "DejaVu Sans", "Segoe UI Symbol"],
+    &["Noto Sans Armenian", "Noto Serif Armenian", "DejaVu Sans"],
+    &["Noto Sans Georgian", "Noto Serif Georgian", "DejaVu Sans"],
+    &["Noto Sans Ethiopic", "Noto Serif Ethiopic"],
+    &["Noto Sans Bengali", "Noto Serif Bengali"],
+    &["Noto Sans Tamil", "Noto Serif Tamil"],
+    &["Noto Sans Telugu", "Noto Serif Telugu"],
+    &["Noto Sans Kannada", "Noto Serif Kannada"],
+    &["Noto Sans Malayalam", "Noto Serif Malayalam"],
+    &["Noto Sans Gujarati", "Noto Serif Gujarati"],
+    &["Noto Sans Gurmukhi", "Noto Serif Gurmukhi"],
+    &["Noto Sans Sinhala", "Noto Serif Sinhala"],
+    &["Noto Sans Khmer", "Noto Serif Khmer"],
+    &["Noto Sans Lao", "Noto Serif Lao"],
+    &["Noto Sans Myanmar", "Noto Serif Myanmar"],
+    &["Noto Serif Tibetan", "Noto Sans Tibetan"],
+];
+
+/// The installed fallback fonts, read once (a CJK font is tens of megabytes).
+fn fallback_fonts() -> &'static [(String, Arc<egui::FontData>)] {
+    static FONTS: OnceLock<Vec<(String, Arc<egui::FontData>)>> = OnceLock::new();
+    FONTS.get_or_init(|| {
+        let mut out: Vec<(String, Arc<egui::FontData>)> = Vec::new();
+        for group in FALLBACKS {
+            let Some(name) = group.iter().find(|n| has_family(n)) else { continue };
+            let slot = format!("fallback-{name}");
+            if out.iter().any(|(s, _)| *s == slot) {
+                continue;
+            }
+            if let Some((bytes, index)) = load_family(name, 400) {
+                let mut fd = egui::FontData::from_owned(bytes);
+                fd.index = index;
+                out.push((slot, Arc::new(fd)));
+            }
+        }
+        out
+    })
+}
+
+fn has_family(name: &str) -> bool {
+    db().faces().any(|f| f.families.iter().any(|(n, _)| n == name))
+}
+
 fn load_family(name: &str, weight: u16) -> Option<(Vec<u8>, u32)> {
     let families = [fontdb::Family::Name(name)];
     let q = fontdb::Query { families: &families, weight: fontdb::Weight(weight), ..Default::default() };
     let id = db().query(&q)?;
     db().with_face_data(id, |data, index| (data.to_vec(), index))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn japanese_names_have_glyphs_when_a_cjk_font_is_installed() {
+        if !FALLBACKS[0].iter().any(|n| has_family(n)) {
+            return; // nothing to fall back on here (e.g. a bare CI machine)
+        }
+        let ctx = egui::Context::default();
+        apply_fonts(&ctx, ("", 400), ("", 400));
+        let _ = ctx.run(Default::default(), |_| {});
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            let id = FontId::new(14.0, family);
+            assert!(ctx.fonts(|f| f.has_glyphs(&id, "日本語のファイル 한글")));
+        }
+    }
 }
