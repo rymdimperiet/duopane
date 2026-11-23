@@ -1012,8 +1012,14 @@ fn palette_ui(ctx: &egui::Context, st: &mut PaletteState) -> (bool, Option<Palet
                         painter.rect_filled(rect, 3.0, theme::c().cursor_inactive);
                     }
                     let y = rect.center().y;
-                    painter.text(pos2(rect.left() + 8.0, y), Align2::LEFT_CENTER, &item.title, font.clone(), theme::c().text);
-                    painter.text(pos2(rect.right() - 8.0, y), Align2::RIGHT_CENTER, &item.detail, small.clone(), theme::c().dim);
+                    // The name wins; the path gets what's left, losing its start first
+                    // since its end (the name and its parents) is what tells folders apart.
+                    let room = rect.width() - 16.0;
+                    let (title, _) = crate::ui::fit_name(ui, &item.title, "", true, room * 0.7, &font);
+                    let title_w = text_width(ui, &title, &font);
+                    let detail = fit_end(ui, &item.detail, room - title_w - 24.0, &small);
+                    painter.text(pos2(rect.left() + 8.0, y), Align2::LEFT_CENTER, title, font.clone(), theme::c().text);
+                    painter.text(pos2(rect.right() - 8.0, y), Align2::RIGHT_CENTER, detail, small.clone(), theme::c().dim);
                     if r.clicked() {
                         pick = Some(item.target.clone());
                     }
@@ -1031,6 +1037,30 @@ fn palette_ui(ctx: &egui::Context, st: &mut PaletteState) -> (bool, Option<Palet
         close = true;
     }
     (close, pick)
+}
+
+fn text_width(ui: &egui::Ui, s: &str, font: &FontId) -> f32 {
+    ui.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x)
+}
+
+/// Shortens text to fit `max_w` by cutting its start ("…/photos/2024"); empty if nothing fits.
+fn fit_end(ui: &egui::Ui, text: &str, max_w: f32, font: &FontId) -> String {
+    if text_width(ui, text, font) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let tail = |n: usize| format!("…{}", chars[chars.len() - n..].iter().collect::<String>());
+    // The most characters of the end that fit.
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if text_width(ui, &tail(mid), font) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if lo == 0 { String::new() } else { tail(lo) }
 }
 
 /// A searchable list of installed fonts. Returns true when the choice changed.
@@ -1163,6 +1193,22 @@ mod tests {
             frame(vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
         }
         answer
+    }
+
+    #[test]
+    fn long_paths_lose_their_start() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let font = FontId::proportional(14.0);
+                let path = "~/.cache/duopane/mounts/per@host/.cache/com.bitwarden.desktop";
+                assert_eq!(fit_end(ui, path, 10_000.0, &font), path);
+                let short = fit_end(ui, path, 250.0, &font);
+                assert!(short.starts_with('…') && short.ends_with("com.bitwarden.desktop"), "{short}");
+                assert!(text_width(ui, &short, &font) <= 250.0);
+                assert_eq!(fit_end(ui, path, 1.0, &font), "");
+            });
+        });
     }
 
     #[test]
