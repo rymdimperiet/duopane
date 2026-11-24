@@ -22,30 +22,6 @@ pub enum SortKey {
     Extension,
 }
 
-impl SortKey {
-    /// For messages: "Sorted by type, then size".
-    pub fn noun(self) -> &'static str {
-        match self {
-            SortKey::Name => "name",
-            SortKey::Size => "size",
-            SortKey::Modified => "date",
-            SortKey::Extension => "type",
-        }
-    }
-
-    /// Which way an order runs, in words: "largest first".
-    pub fn direction(self, ascending: bool) -> &'static str {
-        match (self, ascending) {
-            (SortKey::Size, true) => "smallest first",
-            (SortKey::Size, false) => "largest first",
-            (SortKey::Modified, true) => "oldest first",
-            (SortKey::Modified, false) => "newest first",
-            (_, true) => "A to Z",
-            (_, false) => "Z to A",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub name: String,
@@ -118,10 +94,14 @@ pub struct Pane {
     scroll_memory: HashMap<PathBuf, f32>,
     /// `Some(text)` while the path bar is being edited.
     pub editing_path: Option<String>,
+    /// Ctrl+S: only names containing this are shown (or matching it, with * or ?).
+    pub filter: String,
+    /// Typing goes into the filter rather than jumping to a name.
+    pub filtering: bool,
     /// A folder still being read on another thread.
     loading: Option<Loading>,
     /// Put the cursor on this name once the folder being read arrives.
-    want_cursor: Option<String>,
+    pub(crate) want_cursor: Option<String>,
     /// How long to wait for a read before going on in the background ([`LOAD_WAIT`]).
     load_wait: Duration,
     /// Set while showing search results instead of a folder ("feed to listbox").
@@ -185,6 +165,8 @@ impl Pane {
             view_height: 400.0,
             scroll_memory: HashMap::new(),
             editing_path: None,
+            filter: String::new(),
+            filtering: false,
             loading: None,
             want_cursor: None,
             load_wait: LOAD_WAIT,
@@ -283,6 +265,11 @@ impl Pane {
                 };
             }
         };
+        // A filter belongs to the folder it was typed in.
+        if !matches!(then, After::Reload { gone: None }) {
+            self.filter.clear();
+            self.filtering = false;
+        }
         self.path = path.to_path_buf();
         match fetched {
             Fetched::Dir { all, mtime } => {
@@ -370,6 +357,7 @@ impl Pane {
             .all
             .iter()
             .filter(|e| show_hidden || !e.is_hidden())
+            .filter(|e| filter_matches(&self.filter, &e.name))
             .cloned()
             .collect();
         let (key, asc, then) = (self.sort, self.ascending, self.then);
@@ -453,15 +441,6 @@ impl Pane {
         };
         self.apply_view();
         self.scroll_to_cursor = true;
-    }
-
-    /// The order in words, e.g. "Sorted by type (A to Z), then size (largest first)".
-    pub fn sort_description(&self) -> String {
-        let mut s = format!("Sorted by {} ({})", self.sort.noun(), self.sort.direction(self.ascending));
-        if let Some((k, up)) = self.then {
-            s.push_str(&format!(", then {} ({})", k.noun(), k.direction(up)));
-        }
-        s
     }
 
     pub fn set_show_hidden(&mut self, show: bool) {
@@ -697,6 +676,34 @@ impl Pane {
         names.len()
     }
 
+    /// Alt+Plus / Alt+Minus: selects (or deselects) the files of the same type as
+    /// the one under the cursor. Returns how many there are.
+    pub fn select_same_type(&mut self, on: bool) -> usize {
+        let Some(cur) = self.cursor_entry().filter(|e| !e.is_up()) else { return 0 };
+        let (dir, ext) = (cur.is_dir, cur.extension());
+        let names: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| !e.is_up() && e.is_dir == dir && e.extension() == ext)
+            .map(|e| e.name.clone())
+            .collect();
+        for n in &names {
+            if on {
+                self.selected.insert(n.clone());
+            } else {
+                self.selected.remove(n);
+            }
+        }
+        names.len()
+    }
+
+    /// Changes the Ctrl+S filter, keeping the cursor on the same entry if it's still shown.
+    pub fn set_filter(&mut self, text: &str) {
+        self.filter = text.to_string();
+        self.apply_view();
+        self.scroll_to_cursor = true;
+    }
+
     /// Jumps to the first entry starting with `prefix` (or containing it).
     pub fn quick_find(&mut self, prefix: &str) -> bool {
         let p = prefix.to_lowercase();
@@ -721,6 +728,57 @@ impl Pane {
         let bytes = sel.iter().map(|e| e.size).sum();
         (dirs, files, sel.len(), bytes)
     }
+}
+
+/// Whether a name passes the Ctrl+S filter: it contains the text (ignoring case),
+/// or matches it as a mask when it has * or ?. ".." always does.
+fn filter_matches(filter: &str, name: &str) -> bool {
+    if filter.is_empty() || name == ".." {
+        return true;
+    }
+    if filter.contains(['*', '?']) {
+        Mask::parse(filter).matches_any(name)
+    } else {
+        name.to_lowercase().contains(&filter.to_lowercase())
+    }
+}
+
+/// "Compare folders": the names to select on each side so that copying them
+/// would bring the other side up to date. That's what is missing over there, and
+/// files that are newer here. Files with the same time but different sizes are
+/// selected on both sides, so you can choose. Folders that exist on both sides
+/// aren't looked inside.
+pub fn compare(a: &Pane, b: &Pane) -> (HashSet<String>, HashSet<String>) {
+    // FAT drives keep times to 2 seconds, so a copy can look a little older.
+    const SLACK: Duration = Duration::from_secs(2);
+    let index = |p: &Pane| p.entries.iter().filter(|e| !e.is_up()).map(|e| (e.name.clone(), e.clone())).collect::<HashMap<_, _>>();
+    let (left, right) = (index(a), index(b));
+    let (mut l, mut r) = (HashSet::new(), HashSet::new());
+    for (name, x) in &left {
+        let Some(y) = right.get(name) else {
+            l.insert(name.clone());
+            continue;
+        };
+        if x.is_dir && y.is_dir {
+            continue;
+        }
+        if x.is_dir != y.is_dir {
+            l.insert(name.clone());
+            r.insert(name.clone());
+            continue;
+        }
+        let (tx, ty) = (x.modified.unwrap_or(SystemTime::UNIX_EPOCH), y.modified.unwrap_or(SystemTime::UNIX_EPOCH));
+        if tx > ty + SLACK {
+            l.insert(name.clone());
+        } else if ty > tx + SLACK {
+            r.insert(name.clone());
+        } else if x.size != y.size {
+            l.insert(name.clone());
+            r.insert(name.clone());
+        }
+    }
+    r.extend(right.keys().filter(|n| !left.contains_key(*n)).cloned());
+    (l, r)
 }
 
 /// A selection mask in the style of Double Commander / Total Commander:
@@ -1020,6 +1078,71 @@ mod tests {
     }
 
     #[test]
+    fn filter_same_type_and_compare() {
+        let base = std::env::temp_dir().join(format!("duopane-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (a, b) = (base.join("a"), base.join("b"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d.join("both")).unwrap();
+        }
+        std::fs::create_dir_all(a.join("Photos")).unwrap();
+        for (name, len) in [("a1.jpg", 1), ("a2.JPG", 2), ("notes.txt", 3), ("photo-list.md", 4), ("same.txt", 5), ("newer.txt", 6), ("bigger.txt", 7)] {
+            std::fs::write(a.join(name), vec![0u8; len]).unwrap();
+        }
+        for (name, len) in [("same.txt", 5), ("newer.txt", 6), ("bigger.txt", 70), ("only-b.txt", 1)] {
+            std::fs::write(b.join(name), vec![0u8; len]).unwrap();
+        }
+        // newer.txt: older on the right.
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(b.join("newer.txt")).unwrap().set_modified(old).unwrap();
+        for n in ["same.txt", "bigger.txt"] {
+            let t = std::fs::metadata(a.join(n)).unwrap().modified().unwrap();
+            std::fs::File::options().write(true).open(b.join(n)).unwrap().set_modified(t).unwrap();
+        }
+
+        let mut p = Pane::new(&a, false, true, SortKey::Name, true);
+        let names = |p: &Pane| p.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(" ");
+        // Filtering: contains, ignoring case, folders too; ".." stays.
+        p.set_filter("photo");
+        assert_eq!(names(&p), ".. Photos photo-list.md");
+        p.set_filter("*.jpg");
+        assert_eq!(names(&p), ".. a1.jpg a2.JPG");
+        // What the filter hides isn't acted on, even if it was selected before.
+        p.set_filter("");
+        p.select_all();
+        p.set_filter("notes");
+        assert_eq!(p.targets(), vec![a.join("notes.txt")]);
+        p.set_filter("");
+        p.selected.clear();
+
+        // Same type: from the cursor, case doesn't matter.
+        p.set_cursor_to_name("a1.jpg");
+        assert_eq!(p.select_same_type(true), 2);
+        assert!(p.selected.contains("a2.JPG") && p.selected.len() == 2);
+        p.select_same_type(false);
+        assert!(p.selected.is_empty());
+
+        // Going to another folder drops the filter.
+        p.set_filter("zzz");
+        p.filtering = true;
+        p.navigate(&b).unwrap();
+        assert!(p.filter.is_empty() && !p.filtering);
+        assert!(p.entries.iter().any(|e| e.name == "only-b.txt"));
+
+        let left = Pane::new(&a, false, true, SortKey::Name, true);
+        let right = Pane::new(&b, false, true, SortKey::Name, true);
+        let (l, r) = compare(&left, &right);
+        let sorted = |s: HashSet<String>| {
+            let mut v: Vec<String> = s.into_iter().collect();
+            v.sort();
+            v.join(" ")
+        };
+        assert_eq!(sorted(l), "Photos a1.jpg a2.JPG bigger.txt newer.txt notes.txt photo-list.md");
+        assert_eq!(sorted(r), "bigger.txt only-b.txt");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn second_sort() {
         let dir = std::env::temp_dir().join(format!("duopane-thensort-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1035,7 +1158,6 @@ mod tests {
         assert_eq!(names(&p), "a.jpg c.jpg b.jpg z.txt y.txt", "type, then smallest first");
         p.set_then_sort(SortKey::Size);
         assert_eq!(names(&p), "b.jpg c.jpg a.jpg y.txt z.txt", "type, then largest first");
-        assert_eq!(p.sort_description(), "Sorted by type (A to Z), then size (largest first)");
         // Reversing the first sort leaves the second as it is.
         p.set_sort(SortKey::Extension);
         assert_eq!(names(&p), "y.txt z.txt b.jpg c.jpg a.jpg");

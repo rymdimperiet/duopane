@@ -149,6 +149,7 @@ impl App {
         let mut start: Option<JobSpec> = None;
         let mut pick: Option<PaletteTarget> = None;
         let mut places_pick = None;
+        let mut permissions: Option<(PathBuf, u32)> = None;
 
         match &mut modal {
             Modal::Input { title, hint, text, select_chars, first, purpose } => {
@@ -633,6 +634,20 @@ impl App {
                     d.q.answer(reply);
                     close = true;
                 }
+            }
+            Modal::Properties(p) => match p.ui(ctx) {
+                crate::properties::Outcome::Stay => {}
+                crate::properties::Outcome::Close => close = true,
+                crate::properties::Outcome::Apply(mode) => {
+                    close = true;
+                    permissions = Some((p.path.clone(), mode));
+                }
+            },
+        }
+        if let Some((path, mode)) = permissions {
+            match crate::properties::apply(&path, mode) {
+                Ok(()) => self.reload_all(),
+                Err(e) => self.set_status(format!("Couldn't change the permissions: {e}"), true),
             }
         }
 
@@ -1311,7 +1326,7 @@ mod tests {
         // Up from the top wraps to the last item; a letter jumps to the next item starting with it.
         let mut sel = 0;
         run(vec![key(Key::ArrowUp)], &mut sel);
-        assert_eq!(menu[sel].0, "delete");
+        assert_eq!(menu[sel].0, "properties");
         run(vec![egui::Event::Text("r".into())], &mut sel);
         assert_eq!(menu[sel].0, "rename");
         assert_eq!(run(vec![key(Key::Escape)], &mut sel), (true, None));

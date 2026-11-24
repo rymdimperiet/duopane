@@ -54,6 +54,7 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Up / Down / PgUp / PgDn / Home / End | Move the cursor (hold Shift to select while moving) |
 | Space or Insert | Select / deselect the item under the cursor |
 | Type letters | Jump to the first name that matches |
+| Ctrl+S | **Filter**: typing shows only the names that contain it (or match it, with `*` or `?`). Backspace takes a letter off, Esc shows everything again; Ctrl+S again keeps the filter but stops typing into it |
 | Enter | Open a folder or **step into an archive** (.zip, .tar, .tar.gz), or open a file with its usual app |
 | Shift+Enter, Shift+F10 | The right-click menu for the file under the cursor (shows each item's key) |
 | Ctrl+Enter | Open with… (pick an app; also in the right-click menu) |
@@ -62,6 +63,8 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Numpad + | **Select by mask** (like Double Commander): `*.jpg;*.png`, `*.txt \| readme*` (after `\|` excludes), `src*/` (ending in `/` matches folders) |
 | Numpad − | Deselect by mask (folders too, so `*` clears the whole selection) |
 | Numpad * | Invert the selection |
+| Alt+Numpad + / Alt+Numpad − | Select / deselect every file of the same type as the one under the cursor |
+| Shift+F2 | **Compare folders**: selects, on each side, what the other side lacks or has older. Copy them over (F5) and both sides match. Same date but a different size: selected on both sides. Folders on both sides aren't looked inside |
 | Tab | Switch to the other pane |
 | Alt+F1 / Alt+F2 | **Drive menu** for the left / right pane: home, bookmarks, drives, drives to mount, and SFTP servers (see below) |
 | Ctrl+P | **Go to** a folder: type part of its name, or a path like `~/Doc` (Tab completes) |
@@ -69,6 +72,7 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Ctrl+F or Alt+F7 | **Find files** by name (see below) |
 | Ctrl+Q | **Quick view**: details of the item under the cursor in the other pane (Ctrl+Q again or Tab closes it) |
 | F5 / F6 | Copy / move to the other pane (you can edit the destination) |
+| Shift+F5 | Copy here under another name |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut files, and paste them into the folder in the active pane (also to and from other apps; see below) |
 | F2 or Shift+F6 | Rename (with several files selected: batch rename) |
 | Alt+F5 | **Pack** (compress) the selection into a ZIP, TAR.GZ or TAR archive |
@@ -79,7 +83,10 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | F3 | **Lister**: view the file (see below); on a folder, a tree of everything in it |
 | F4 | Edit the file |
 | F8 or Delete | Move to the trash |
+| Ctrl+Z | Put back what was last moved to the trash (never over something that has taken its place) |
 | Shift+F8 or Shift+Delete | Delete permanently |
+| Alt+Enter | **Properties**: details, and permissions to change (X: can be run as a program) |
+| (command palette, right-click menu) | **Checksum**: the SHA-256 of a file, checked against a `SHA256SUMS` or `name.sha256` next to it. On such a list, checks every file it names |
 | Ctrl+3 / 4 / 5 / 6 (or Ctrl+F3 / F4 / F5 / F6) | Sort by name / type / date / size (press again to reverse) |
 | Ctrl+Shift+3 / 4 / 5 / 6 (or Ctrl+Shift+F3 / F4 / F5 / F6), or Ctrl+click a column | Then sort by name / type / date / size, for files the first sort calls equal (e.g. type, then size). Press again to reverse, a third time to turn it off |
 | Ctrl+. or Ctrl+H | Show / hide hidden files |

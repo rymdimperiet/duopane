@@ -32,6 +32,8 @@ pub enum InputPurpose {
     NewFolder,
     NewFile,
     Transfer { mv: bool, sources: Vec<PathBuf> },
+    /// Shift+F5: a copy of this, next to it, under the name typed.
+    CopyInPlace(PathBuf),
     /// Select (or deselect) by mask.
     Mask { select: bool },
     /// Copy entries out of the archive being browsed.
@@ -80,6 +82,8 @@ pub enum Modal {
     Places(crate::places::PlacesMenu),
     /// The right-click menu opened from the keyboard (Shift+Enter), with each item's keys.
     RowMenu { at: egui::Pos2, selected: usize, items: Vec<crate::dialogs::MenuItem> },
+    /// Alt+Enter.
+    Properties(crate::properties::Properties),
 }
 
 /// Mounting or unmounting in the background (see `places.rs`).
@@ -128,6 +132,10 @@ pub struct App {
     /// A newer release, once known (shown in the key bar and the About box).
     pub(crate) update: Option<crate::update::Release>,
     update_rx: Option<std::sync::mpsc::Receiver<Option<crate::update::Release>>>,
+    /// What the last "Move to trash" took, for Ctrl+Z.
+    pub(crate) last_trashed: Vec<PathBuf>,
+    /// A checksum being worked out, and how to stop it.
+    pub(crate) checksum: Option<(mpsc::Receiver<crate::checksum::Report>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// The F3 viewer, when open (it takes over the window).
     pub(crate) lister: Option<crate::lister::Lister>,
     /// The last batch rename: folder and (new name, old name) pairs, for undo.
@@ -207,6 +215,8 @@ impl App {
             mount_job: None,
             update: None,
             update_rx: None,
+            last_trashed: Vec::new(),
+            checksum: None,
             lister: None,
             last_batch: None,
             panes_rect: None,
@@ -338,8 +348,10 @@ impl App {
     }
 
     pub(crate) fn start_job(&mut self, spec: JobSpec) {
+        if let JobSpec::Delete { paths, permanent: false } = &spec {
+            self.last_trashed = paths.clone();
+        }
         if self.job.is_some() {
-            self.set_status(format!("Queued: {}", spec.label()), false);
             self.queue.push_back(spec);
         } else {
             self.job = Some(fs_ops::start(spec));
@@ -430,14 +442,15 @@ impl App {
                 self.set_status(format!("{}: {}", plural(n, "item"), human_size(bytes)), false);
             }
         }
+        if let Some(report) = self.checksum.as_ref().and_then(|(rx, _)| rx.try_recv().ok()) {
+            self.checksum = None;
+            self.status = None;
+            if self.modal.is_none() {
+                self.modal = Some(Modal::Message { title: report.title, text: report.text });
+            }
+        }
         if let Some(found) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.update_rx = None;
-            let news = found.as_ref().is_some_and(|r| self.update.as_ref().map(|u| &u.version) != Some(&r.version));
-            if let Some(r) = &found {
-                if news {
-                    self.set_status(format!("Duopane {} is out (download it from the button at the bottom right)", r.version), false);
-                }
-            }
             self.settings.newest_release = found.as_ref().map(|r| r.version.clone());
             self.update = found;
             self.dirty = true;
@@ -511,6 +524,9 @@ impl App {
                 Event::Key { key, pressed: true, modifiers, .. } => {
                     skip_text = false;
                     let plain = !modifiers.command && !modifiers.ctrl && !modifiers.alt;
+                    if plain && !modifiers.shift && self.filter_key(key) {
+                        continue;
+                    }
                     if plain && self.move_key(key, modifiers.shift) {
                         self.quick.clear();
                         searching = false;
@@ -546,6 +562,12 @@ impl App {
                     if mods_now.command || mods_now.ctrl || mods_now.alt || t.trim().is_empty() || t.chars().any(char::is_control) {
                         continue;
                     }
+                    let pane = &mut self.panes[self.active];
+                    if pane.filtering {
+                        let text = format!("{}{t}", pane.filter);
+                        pane.set_filter(&text);
+                        continue;
+                    }
                     // Numpad * inverts the selection, like Double Commander.
                     if t == "*" && !searching {
                         self.panes[self.active].invert_selection();
@@ -573,6 +595,32 @@ impl App {
             i.events.retain(|e| !matches!(e, Event::Key { .. } | Event::Text(_) | Event::Copy | Event::Cut | Event::Paste(_)));
             i.events.extend(rest);
         });
+    }
+
+    /// Keys that edit the Ctrl+S filter: Backspace takes a letter off, Esc clears it,
+    /// Enter stops typing into it (and goes on to open as usual). "+" and "-" are
+    /// part of the text while typing. Returns true when the key was used up.
+    fn filter_key(&mut self, key: Key) -> bool {
+        let pane = &mut self.panes[self.active];
+        match key {
+            Key::Escape if pane.filtering || !pane.filter.is_empty() => {
+                pane.filtering = false;
+                pane.set_filter("");
+                true
+            }
+            Key::Backspace if pane.filtering => {
+                let mut text = pane.filter.clone();
+                text.pop();
+                pane.set_filter(&text);
+                true
+            }
+            Key::Enter if pane.filtering => {
+                pane.filtering = false;
+                false
+            }
+            Key::Plus | Key::Minus => pane.filtering,
+            _ => false,
+        }
     }
 
     /// Cursor movement and selection keys. Returns true when the key was used.

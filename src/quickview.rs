@@ -296,6 +296,28 @@ fn gather(t: &Target) -> Info {
 }
 
 fn gather_disk(path: &Path) -> Info {
+    let mut info = general(path);
+    if info.is_dir || info.sections.first().is_some_and(|(_, rows)| rows.first().is_some_and(|(k, _)| k.is_empty())) {
+        return info;
+    }
+    let ext = crate::lister_load::ext(path);
+    if is_picture(&ext) {
+        picture_details(path, &mut info);
+    } else if is_media(&ext) {
+        media_details(path, &mut info);
+    } else if ext == "pdf" {
+        pdf_details(path, &mut info);
+    } else if crate::archive::is_archive(path) {
+        archive_details(path, &mut info);
+    } else {
+        info.text = text_start(path);
+    }
+    info
+}
+
+/// The "General" section alone: kind, place, size, times, permissions and owner
+/// (also used by the Properties dialog).
+pub(crate) fn general(path: &Path) -> Info {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
     let Ok(lmeta) = std::fs::symlink_metadata(path) else {
         return Info { name, sections: vec![("General".into(), vec![("".into(), "Can't be read (gone, or no permission)".into())])], ..Default::default() };
@@ -341,22 +363,6 @@ fn gather_disk(path: &Path) -> Info {
         general.push(("Owner".into(), format!("{}  ·  group {}", user_name(meta.uid()), group_name(meta.gid()))));
     }
     info.sections.push(("General".into(), general));
-    if is_dir {
-        return info;
-    }
-
-    let ext = crate::lister_load::ext(path);
-    if is_picture(&ext) {
-        picture_details(path, &mut info);
-    } else if is_media(&ext) {
-        media_details(path, &mut info);
-    } else if ext == "pdf" {
-        pdf_details(path, &mut info);
-    } else if crate::archive::is_archive(path) {
-        archive_details(path, &mut info);
-    } else {
-        info.text = text_start(path);
-    }
     info
 }
 

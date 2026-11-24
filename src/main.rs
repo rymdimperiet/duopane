@@ -18,6 +18,8 @@
 //! - `places.rs`   – the drive menu (Alt+F1 / Alt+F2): places, drives, mounting
 //! - `open_with.rs` – "Open with" (Ctrl+Enter): apps for a file from .desktop files and mimeapps.list
 //! - `quickview.rs` – Quick view (Ctrl+Q): details of the item under the cursor
+//! - `properties.rs` – Properties (Alt+Enter): details and permissions
+//! - `checksum.rs` – SHA-256 checksums, checked against SHA256SUMS and the like
 //! - `native_drag.rs` – drag and drop with other apps on Wayland
 //! - `theme.rs`    – colour schemes, fonts and sizes
 //! - `icons.rs`    – file-type icons (a few Nerd Font icons in assets/icons.ttf)
@@ -27,6 +29,7 @@
 mod actions;
 mod app;
 mod archive;
+mod checksum;
 mod commands;
 mod dialogs;
 mod filetypes;
@@ -41,6 +44,7 @@ mod fuzzy;
 mod icons;
 mod pane;
 mod places;
+mod properties;
 mod quickview;
 mod rename;
 mod search;

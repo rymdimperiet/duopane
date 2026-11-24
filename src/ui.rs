@@ -355,12 +355,11 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
         // --- the list ---
         let footer_h = 22.0;
         let row_h = theme::row_height(body_size);
-        // Show whole rows only, and keep the separator a few pixels below the list,
-        // so the line never runs through a half-visible name.
+        // The list fills the room down to the footer; the last row may be cut off
+        // (scrolling to the cursor always shows its row whole). It stops a few
+        // pixels short of the footer's line, so the line never crosses a name.
         let gap = 4.0;
-        let room = (ui.available_height() - footer_h - gap).max(row_h);
-        let list_h = (room / row_h).floor().max(1.0) * row_h;
-        let spare = room - list_h;
+        let list_h = (ui.available_height() - footer_h - gap).max(row_h);
         let n = pane.entries.len();
         let mut area = egui::ScrollArea::vertical()
             .id_salt(("list", idx))
@@ -401,7 +400,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
         pane.view_height = out.inner_rect.height();
 
         // --- footer ---
-        ui.add_space(spare + gap);
+        ui.add_space(gap);
         let (foot_rect, _) = ui.allocate_exact_size(vec2(full_w, footer_h), Sense::hover());
         ui.painter().hline(foot_rect.x_range(), foot_rect.top(), Stroke::new(1.0_f32, theme::c().border));
         let (dirs, files, sel, bytes) = pane.summary();
@@ -415,8 +414,22 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
             Some(p) => (format!("Loading {}…", crate::app::tilde(p)), ""),
             None => (text, hidden),
         };
+        // The Ctrl+S filter comes first, with a text cursor while it's being typed.
+        let mut x = foot_rect.left() + 10.0;
+        if pane.filtering || !pane.filter.is_empty() {
+            let typing = if pane.filtering { "▏" } else { "" };
+            let r = ui.painter().text(
+                pos2(x, foot_rect.center().y),
+                Align2::LEFT_CENTER,
+                format!("Filter: {}{typing}", pane.filter),
+                small.clone(),
+                theme::c().accent,
+            );
+            x = r.right() + 14.0;
+        }
+        let hidden = if pane.filter.is_empty() { hidden } else { "   (Esc shows all)" };
         ui.painter().text(
-            pos2(foot_rect.left() + 10.0, foot_rect.center().y),
+            pos2(x, foot_rect.center().y),
             Align2::LEFT_CENTER,
             format!("{text}{hidden}"),
             small.clone(),
@@ -558,6 +571,10 @@ pub(crate) fn row_menu(name: &str, is_dir: bool, in_archive: bool) -> Vec<(&'sta
         items.push(("open", crate::open_with::default_app(name, false).map_or_else(|| "Open".to_string(), |a| format!("Open ({})", a.name))));
     }
     items.extend(ROW_MENU.iter().map(|&(id, t)| (id, t.to_string())));
+    if !is_dir {
+        items.push(("checksum", "Checksum".to_string()));
+    }
+    items.push(("properties", "Properties…".to_string()));
     items
 }
 
@@ -565,6 +582,7 @@ const ROW_MENU: &[(&str, &str)] = &[
     ("open_with", "Open with…"),
     ("edit", "Edit"),
     ("rename", "Rename…"),
+    ("copy_in_place", "Copy here as…"),
     ("copy", "Copy to other pane…"),
     ("move", "Move to other pane…"),
     ("clip_copy", "Copy"),
@@ -871,6 +889,8 @@ fn short_label(id: &str) -> Option<&'static str> {
         "then_sort_extension" => "Then: type",
         "then_sort_modified" => "Then: date",
         "then_sort_size" => "Then: size",
+        "compare" => "Compare",
+        "copy_in_place" => "Copy as",
         _ => return None,
     })
 }

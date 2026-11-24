@@ -55,8 +55,15 @@ pub fn builtin() -> Vec<Command> {
             a.settings.pane_split = 0.5;
             a.settings.columns = Default::default();
             a.dirty = true;
-            a.set_status("Panes and columns are back to their usual sizes", false);
         }),
+        cmd!("filter", "Filter: show only names with the text typed", ["Ctrl+S"], |a, _| a.toggle_filter()),
+        cmd!("compare", "Compare folders (select what differs)", ["Shift+F2"], |a, _| a.compare_panes()),
+        cmd!("select_type", "Select all files of this type", ["Alt+Plus"], |a, _| a.select_same_type(true)),
+        cmd!("unselect_type", "Deselect all files of this type", ["Alt+Minus"], |a, _| a.select_same_type(false)),
+        cmd!("copy_in_place", "Copy here under another name…", ["Shift+F5"], |a, _| a.ask_copy_in_place()),
+        cmd!("restore_trashed", "Put back what was moved to the trash", ["Ctrl+Z"], |a, _| a.restore_trashed()),
+        cmd!("checksum", "Checksum (SHA-256), or check a SHA256SUMS file", [], |a, ctx| a.checksum(ctx)),
+        cmd!("properties", "Properties and permissions…", ["Alt+Enter"], |a, _| a.properties()),
         cmd!("toggle_hidden", "Show / hide hidden files", ["Ctrl+Period", "Ctrl+H"], |a, _| a.toggle_hidden()),
         cmd!("reload", "Reload both panes", ["Ctrl+R"], |a, _| a.reload_all()),
         cmd!("select_all", "Select all", ["Ctrl+A"], |a, _| a.active_pane().select_all()),

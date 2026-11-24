@@ -22,7 +22,6 @@ impl App {
             // Like Double Commander: step into the archive as if it were a folder.
             self.navigate(self.active, &e.path);
             if self.panes[self.active].archive.is_some() {
-                self.set_status("Inside the archive · F5 copies files out · “..” leaves", false);
             }
         } else {
             self.open_external_entry(&e);
@@ -45,7 +44,7 @@ impl App {
             return self.launch_with(&app, &[path]);
         }
         match open::that_detached(&path) {
-            Ok(()) => self.set_status(format!("Opened {}", e.name), false),
+            Ok(()) => {},
             Err(err) => self.set_status(format!("Couldn't open {}: {err}", e.name), true),
         }
     }
@@ -135,7 +134,6 @@ impl App {
                 return self.set_status(format!("Couldn't start {}: {e}", app.name), true);
             }
         }
-        self.set_status(format!("Opened with {}", app.name), false);
     }
 
     /// A command line wrapped to run in a terminal window (for apps marked Terminal=true).
@@ -241,12 +239,10 @@ impl App {
             PlacesOutcome::ForgetMount(point) => {
                 self.settings.remounts.retain(|r| r.point != point);
                 self.dirty = true;
-                self.set_status(format!("Forgot {}", tilde(&point)), false);
             }
             PlacesOutcome::Forget(target) => {
                 self.settings.sftp_recent.retain(|t| *t != target);
                 self.dirty = true;
-                self.set_status(format!("Forgot {target}"), false);
             }
             PlacesOutcome::Unmount(place) => {
                 if self.mount_job.is_some() {
@@ -296,7 +292,6 @@ impl App {
                 }
                 self.active = job.pane;
                 self.navigate(job.pane, &dir);
-                self.set_status(format!("Opened {}", job.name), false);
             }
             Ok(Done::Unmounted(again)) => {
                 if let Some(r) = again {
@@ -353,7 +348,6 @@ impl App {
         loop {
             i += dir;
             if i < 0 || i >= n {
-                self.set_status(if dir > 0 { "That was the last file" } else { "That was the first file" }, false);
                 return;
             }
             if !pane.entries[i as usize].is_dir {
@@ -491,14 +485,13 @@ impl App {
     pub(crate) fn apply_batch_rename(&mut self, dir: PathBuf, olds: Vec<String>, news: Vec<String>) {
         let pairs: Vec<(String, String)> = olds.into_iter().zip(news).filter(|(o, n)| o != n).collect();
         if pairs.is_empty() {
-            return self.set_status("Nothing changes with these settings", false);
+            return self.set_status("Nothing changes with these settings", true);
         }
         let (done, errors) = Self::rename_pairs(&dir, &pairs);
         let n = done.len();
         self.last_batch = Some((dir, done));
         self.reload_all();
         if errors.is_empty() {
-            self.set_status(format!("Renamed {} (undo from the command palette)", plural(n, "item")), false);
         } else {
             self.set_status(format!("Renamed {n}, {} failed", errors.len()), true);
             self.modal = Some(Modal::Message { title: "Some items couldn't be renamed".into(), text: errors.join("\n") });
@@ -509,11 +502,9 @@ impl App {
         let Some((dir, done)) = self.last_batch.take() else {
             return self.set_status("No batch rename to undo", true);
         };
-        let (undone, errors) = Self::rename_pairs(&dir, &done);
+        let (_, errors) = Self::rename_pairs(&dir, &done);
         self.reload_all();
-        if errors.is_empty() {
-            self.set_status(format!("Undid the rename of {}", plural(undone.len(), "item")), false);
-        } else {
+        if !errors.is_empty() {
             self.modal = Some(Modal::Message { title: "Some names couldn't be put back".into(), text: errors.join("\n") });
         }
     }
@@ -557,11 +548,8 @@ impl App {
         self.settings.mask_history.truncate(20);
         self.dirty = true;
         let n = self.panes[self.active].select_by_mask(mask, select);
-        let verb = if select { "Selected" } else { "Deselected" };
         if n == 0 {
             self.set_status(format!("Nothing matches “{mask}” (end a mask with / to match folders)"), true);
-        } else {
-            self.set_status(format!("{verb} {}", plural(n, "item")), false);
         }
     }
 
@@ -618,7 +606,6 @@ impl App {
         for p in &mut self.panes {
             p.set_show_hidden(show);
         }
-        self.set_status(if show { "Showing hidden files" } else { "Hiding hidden files" }, false);
         self.dirty = true;
     }
 
@@ -637,11 +624,9 @@ impl App {
     pub fn then_sort_by(&mut self, key: SortKey) {
         let pane = &mut self.panes[self.active];
         if pane.sort == key {
-            return self.set_status(format!("Already sorted by {} first", key.noun()), false);
+            return;
         }
         pane.set_then_sort(key);
-        let text = pane.sort_description();
-        self.set_status(text, false);
         self.dirty = true;
     }
 
@@ -652,7 +637,6 @@ impl App {
         }
         let text = targets.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n");
         ctx.copy_text(text);
-        self.set_status(format!("Copied {} to the clipboard", plural(targets.len(), "path")), false);
     }
 
     /// Ctrl+C / Ctrl+X: puts the selected files on the clipboard; Ctrl+V copies
@@ -674,11 +658,7 @@ impl App {
         if !as_files {
             ctx.copy_text(paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"));
         }
-        let what = describe(&paths);
-        let them = if paths.len() == 1 { "it" } else { "them" };
         self.clip = Some(crate::app::Clip { paths, cut });
-        let msg = if cut { format!("Cut {what}: Ctrl+V moves {them} here") } else { format!("Copied {what}: Ctrl+V pastes {them}") };
-        self.set_status(msg, false);
     }
 
     /// Ctrl+V: pastes files from the clipboard into the folder in the active pane.
@@ -730,7 +710,6 @@ impl App {
             self.settings.bookmarks.push(p.clone());
             self.dirty = true;
         }
-        self.set_status(format!("Bookmarked {} (find it with Go to)", tilde(&p)), false);
     }
 
     pub fn remove_bookmark(&mut self) {
@@ -739,7 +718,6 @@ impl App {
         self.settings.bookmarks.retain(|b| b != &p);
         if self.settings.bookmarks.len() != before {
             self.dirty = true;
-            self.set_status("Bookmark removed", false);
         } else {
             self.set_status("This folder isn't bookmarked", true);
         }
@@ -823,7 +801,7 @@ impl App {
             cmd.arg("--all-compact");
         }
         match cmd.args(&paths).spawn_reaped() {
-            Ok(()) => self.set_status(format!("Drag {} from the small window that opened", describe(&targets)), false),
+            Ok(()) => {},
             Err(e) => self.set_status(format!("Couldn't start {helper}: {e}"), true),
         }
     }
@@ -969,9 +947,6 @@ impl App {
         self.queue.clear();
         if let Some(j) = &self.job {
             j.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            self.set_status("Cancelling…", false);
-        } else {
-            self.set_status("Nothing is running", false);
         }
     }
 
@@ -981,7 +956,6 @@ impl App {
             return self.set_status(format!("Couldn't write settings: {e}"), true);
         }
         self.edit_in_editor(&Settings::file());
-        self.set_status("After saving your changes, run “Reload settings file”", false);
     }
 
     pub fn reload_settings(&mut self, ctx: &egui::Context) {
@@ -997,9 +971,8 @@ impl App {
             p.set_show_hidden(show);
         }
         self.rebuild_bindings();
-        match err {
-            Some(e) => self.set_status(e, true),
-            None => self.set_status("Settings reloaded", false),
+        if let Some(e) = err {
+            self.set_status(e, true);
         }
     }
 
@@ -1109,7 +1082,7 @@ impl App {
             .env("DUOPANE_SELECTED", selected.join("\n"))
             .spawn_reaped();
         match res {
-            Ok(_) => self.set_status(format!("Ran “{}”", c.title), false),
+            Ok(_) => {},
             Err(e) => self.set_status(format!("“{}” failed: {e}", c.title), true),
         }
     }
@@ -1166,6 +1139,7 @@ impl App {
                 self.start_job(JobSpec::Extract { archive, items, base, dest, policy: ConflictPolicy::Ask });
             }
             InputPurpose::Mask { select } => self.apply_mask(select, &text),
+            InputPurpose::CopyInPlace(from) => self.copy_in_place(from, &text),
         }
     }
 
@@ -1234,7 +1208,7 @@ impl App {
             })
             .collect();
         if items.is_empty() {
-            return self.set_status("Nothing to do: it's already there", false);
+            return self.set_status("Nothing to do: it's already there", true);
         }
         // Anything already there is asked about file by file while the job runs.
         self.start_job(JobSpec::Transfer { mv, items, policy: ConflictPolicy::Ask });
@@ -1271,4 +1245,176 @@ fn find_in_path(name: &str) -> bool {
 /// Where files unpacked from archives (for viewing or opening) go; removed on exit.
 pub fn temp_area() -> PathBuf {
     std::env::temp_dir().join(format!("duopane-{}", std::process::id()))
+}
+
+impl App {
+    /// Ctrl+S: typing narrows the list to matching names. Pressed again, typing
+    /// goes back to jumping (the filter stays until Esc).
+    pub fn toggle_filter(&mut self) {
+        let pane = &mut self.panes[self.active];
+        pane.filtering = !pane.filtering;
+        self.quick.clear();
+    }
+
+    /// Shift+F2: selects what differs between the two panes (see `pane::compare`).
+    pub fn compare_panes(&mut self) {
+        let (l, r) = crate::pane::compare(&self.panes[0], &self.panes[1]);
+        if l.is_empty() && r.is_empty() {
+            self.set_status("Both folders hold the same files", false);
+        }
+        self.panes[0].selected = l;
+        self.panes[1].selected = r;
+    }
+
+    /// Alt+Plus / Alt+Minus.
+    pub fn select_same_type(&mut self, on: bool) {
+        self.panes[self.active].select_same_type(on);
+    }
+
+    /// Shift+F5: a copy next to the original, under a name you choose.
+    pub fn ask_copy_in_place(&mut self) {
+        if self.refuse_in_archive("Copying in place") {
+            return;
+        }
+        let Some(e) = self.panes[self.active].cursor_entry().cloned().filter(|e| !e.is_up()) else { return };
+        let suggested = fs_ops::unique_copy_name(&e.path);
+        let name = suggested.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let original = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem_len = match name.rfind('.') {
+            Some(i) if i > 0 && !e.is_dir => name[..i].chars().count(),
+            _ => name.chars().count(),
+        };
+        self.ask(format!("Copy “{original}” as:"), "New name, in the same folder", name, InputPurpose::CopyInPlace(e.path), Some(stem_len));
+    }
+
+    pub(crate) fn copy_in_place(&mut self, from: PathBuf, text: &str) {
+        if text.contains('/') {
+            return self.set_status("A name can't contain “/”", true);
+        }
+        let to = from.parent().unwrap_or(Path::new("/")).join(text);
+        if to == from {
+            return self.set_status("Nothing to do: it's already there", true);
+        }
+        let p = &mut self.panes[self.active];
+        p.want_cursor = Some(text.to_string());
+        self.start_job(JobSpec::Transfer { mv: false, items: vec![(from, to)], policy: ConflictPolicy::Ask });
+    }
+
+    /// Ctrl+Z: puts back what the last "Move to trash" took. Nothing is
+    /// overwritten: a file whose place is taken again stays in the trash.
+    pub fn restore_trashed(&mut self) {
+        if self.last_trashed.is_empty() {
+            return self.set_status("Nothing to put back: nothing was moved to the trash since Duopane started", true);
+        }
+        match restore_from_trash(&self.last_trashed) {
+            Ok(left) => {
+                self.last_trashed.clear();
+                self.reload_all();
+                if !left.is_empty() {
+                    self.modal = Some(Modal::Message { title: "Some items stay in the trash".into(), text: left.join("\n") });
+                }
+            }
+            Err(e) => self.set_status(e, true),
+        }
+    }
+
+    /// "Checksum": SHA-256 of the file under the cursor, or a check of a SHA256SUMS list.
+    pub fn checksum(&mut self, ctx: &egui::Context) {
+        let Some(e) = self.panes[self.active].cursor_entry().cloned().filter(|e| !e.is_up()) else { return };
+        if e.is_dir {
+            return self.set_status("Checksums are for files, not folders", true);
+        }
+        if self.refuse_in_archive("Taking a checksum") {
+            return;
+        }
+        if let Some((_, cancel)) = self.checksum.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let (tx, rx) = mpsc::channel();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = cancel.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::checksum::check(&e.path, &stop));
+            ctx.request_repaint();
+        });
+        self.checksum = Some((rx, cancel));
+        self.set_status("Calculating checksum…", false);
+    }
+
+    /// Alt+Enter.
+    pub fn properties(&mut self) {
+        if self.refuse_in_archive("Properties") {
+            return;
+        }
+        let pane = &self.panes[self.active];
+        let Some(e) = pane.cursor_entry() else { return };
+        let path = if e.is_up() { pane.path.clone() } else { e.path.clone() };
+        self.modal = Some(Modal::Properties(crate::properties::Properties::new(path)));
+    }
+}
+
+/// Restores each path from the trash (its most recent copy there). Returns the
+/// ones that couldn't be, with the reason.
+#[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn restore_from_trash(paths: &[PathBuf]) -> Result<Vec<String>, String> {
+    let items = trash::os_limited::list().map_err(|e| format!("Couldn't read the trash: {e}"))?;
+    let mut left = Vec::new();
+    for (path, item) in pick_restores(items, paths) {
+        let Some(item) = item else {
+            left.push(format!("{}: not in the trash any more", tilde(&path)));
+            continue;
+        };
+        if path.symlink_metadata().is_ok() {
+            left.push(format!("{}: something else has that name now", tilde(&path)));
+            continue;
+        }
+        if let Err(e) = trash::os_limited::restore_all([item]) {
+            left.push(format!("{}: {e}", tilde(&path)));
+        }
+    }
+    Ok(left)
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
+fn restore_from_trash(_: &[PathBuf]) -> Result<Vec<String>, String> {
+    Err("Putting files back from the trash isn't possible on this system yet".into())
+}
+
+/// For each path, its most recently trashed copy (if the trash still has one).
+#[cfg_attr(not(any(test, target_os = "windows", all(unix, not(target_os = "macos")))), allow(dead_code))]
+fn pick_restores(items: Vec<trash::TrashItem>, paths: &[PathBuf]) -> Vec<(PathBuf, Option<trash::TrashItem>)> {
+    // The trash keeps the real folder, so compare against that.
+    let real = |p: &Path| match (p.parent().and_then(|d| std::fs::canonicalize(d).ok()), p.file_name()) {
+        (Some(d), Some(n)) => d.join(n),
+        _ => p.to_path_buf(),
+    };
+    let mut best: std::collections::HashMap<PathBuf, trash::TrashItem> = std::collections::HashMap::new();
+    for item in items {
+        let at = item.original_path();
+        if best.get(&at).is_none_or(|b| b.time_deleted < item.time_deleted) {
+            best.insert(at, item);
+        }
+    }
+    paths.iter().map(|p| (p.clone(), best.remove(&real(p)).or_else(|| best.remove(p)))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_newest_trashed_copy_comes_back() {
+        let item = |name: &str, parent: &str, t: i64| trash::TrashItem {
+            id: format!("{name}{t}").into(),
+            name: name.into(),
+            original_parent: parent.into(),
+            time_deleted: t,
+        };
+        let items = vec![item("a.txt", "/x", 10), item("a.txt", "/x", 30), item("a.txt", "/y", 50), item("b.txt", "/x", 5)];
+        let picked = pick_restores(items, &[PathBuf::from("/x/a.txt"), PathBuf::from("/x/gone.txt")]);
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0].1.as_ref().map(|i| i.time_deleted), Some(30));
+        assert!(picked[1].1.is_none());
+    }
 }
