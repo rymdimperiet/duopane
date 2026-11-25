@@ -67,7 +67,7 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Shift+F2 | **Compare folders**: selects, on each side, what the other side lacks or has older. Copy them over (F5) and both sides match. Same date but a different size: selected on both sides. Folders on both sides aren't looked inside |
 | Tab | Switch to the other pane |
 | Alt+F1 / Alt+F2 | **Drive menu** for the left / right pane: home, bookmarks, drives, drives to mount, and SFTP servers (see below) |
-| Ctrl+P | **Go to** a folder: type part of its name, or a path like `~/Doc` (Tab completes) |
+| Ctrl+P (or Ctrl+D) | **Go to** a folder: type part of its name, or a path like `~/Doc` (Tab completes) |
 | Ctrl+Shift+P | **Command palette**: every command, searchable |
 | Ctrl+F or Alt+F7 | **Find files** by name (see below) |
 | Ctrl+Q | **Quick view**: details of the item under the cursor in the other pane (Ctrl+Q again or Tab closes it) |

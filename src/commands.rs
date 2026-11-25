@@ -32,7 +32,7 @@ pub fn builtin() -> Vec<Command> {
         cmd!("go_up", "Go up to the parent folder", ["Backspace", "Alt+Up", "Left", "Alt+Left"], |a, _| a.go_up()),
         cmd!("enter_folder", "Go down into the folder under the cursor", ["Right", "Alt+Right"], |a, _| a.enter_folder()),
         cmd!("switch_pane", "Switch to the other pane", ["Tab"], |a, _| a.switch_pane()),
-        cmd!("go_to", "Go to folder…", ["Ctrl+P"], |a, ctx| a.open_goto(ctx)),
+        cmd!("go_to", "Go to folder…", ["Ctrl+P", "Ctrl+D"], |a, ctx| a.open_goto(ctx)),
         cmd!("command_palette", "Show all commands…", ["Ctrl+Shift+P"], |a, _| a.open_palette()),
         cmd!("copy", "Copy to the other pane…", ["F5"], |a, _| a.ask_transfer(false)),
         cmd!("move", "Move to the other pane…", ["F6"], |a, _| a.ask_transfer(true)),
@@ -67,7 +67,7 @@ pub fn builtin() -> Vec<Command> {
         cmd!("toggle_hidden", "Show / hide hidden files", ["Ctrl+Period", "Ctrl+H"], |a, _| a.toggle_hidden()),
         cmd!("reload", "Reload both panes", ["Ctrl+R"], |a, _| a.reload_all()),
         cmd!("select_all", "Select all", ["Ctrl+A"], |a, _| a.active_pane().select_all()),
-        cmd!("deselect_all", "Deselect all", ["Ctrl+D"], |a, _| a.active_pane().selected.clear()),
+        cmd!("deselect_all", "Deselect all", ["Ctrl+Shift+A"], |a, _| a.active_pane().selected.clear()),
         cmd!("invert_selection", "Invert selection", ["Ctrl+I"], |a, _| a.active_pane().invert_selection()),
         // Like Double Commander: numpad + selects by mask, numpad - deselects, numpad * inverts.
         cmd!("select_mask", "Select by mask…", ["Plus"], |a, _| a.ask_mask(true)),
