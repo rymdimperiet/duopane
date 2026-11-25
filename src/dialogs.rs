@@ -566,6 +566,25 @@ impl App {
                             self.dirty = true;
                         }
                         ui.end_row();
+
+                        ui.label("Sort names");
+                        let shown = self.settings.sort_language.map_or("System default", |c| c.label());
+                        let mut choice = self.settings.sort_language;
+                        egui::ComboBox::from_id_salt("sort_language").width(300.0).selected_text(shown).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut choice, None, "System default");
+                            for c in crate::pane::Collation::ALL {
+                                ui.selectable_value(&mut choice, Some(c), c.label());
+                            }
+                        });
+                        if choice != self.settings.sort_language {
+                            self.settings.sort_language = choice;
+                            crate::pane::set_collation(choice);
+                            for p in &mut self.panes {
+                                p.apply_view();
+                            }
+                            self.dirty = true;
+                        }
+                        ui.end_row();
                     });
                     ui.add_space(10.0);
                     // A small preview of the colours.

@@ -979,47 +979,171 @@ fn is_executable(m: &fs::Metadata) -> bool {
     }
 }
 
-/// Case-insensitive comparison where "file2" sorts before "file10".
+/// Name order, as people expect it rather than by character codes:
+/// - case doesn't matter, and "file2" comes before "file10";
+/// - accents don't count: "Éric" sorts with the E's;
+/// - punctuation and symbols are skipped: "“Weird Al”" sorts under W;
+/// - Å, Ä, Ö (and Æ, Ø) go after Z in Swedish, Finnish, Danish and Norwegian,
+///   following the "Sort names" setting, which by default follows the
+///   system's language; elsewhere they're A and O.
+///
+/// Names that only differ in what's ignored are then put in the plain order, so
+/// the order is always the same.
 pub fn natural_cmp(a: &str, b: &str) -> Ordering {
-    let a = a.to_lowercase();
-    let b = b.to_lowercase();
-    let mut ai = a.chars().peekable();
-    let mut bi = b.chars().peekable();
+    let lang = collation();
+    natural(&sort_key(a, lang), &sort_key(b, lang))
+        .then_with(|| natural(&a.to_lowercase().chars().collect::<Vec<_>>(), &b.to_lowercase().chars().collect::<Vec<_>>()))
+        .then_with(|| a.cmp(b))
+}
+
+/// How letters beyond A–Z are ordered (the "Sort names" setting).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Collation {
+    /// Accents dropped: Å Ä → A, Ö Ø → O.
+    Plain,
+    /// Swedish and Finnish: … X Y Z Å Ä Ö (Æ as Ä, Ø as Ö, Ü as Y).
+    Swedish,
+    /// Danish and Norwegian: … X Y Z Æ Ø Å (Ä as Æ, Ö as Ø, Ü as Y).
+    Danish,
+}
+
+impl Collation {
+    pub const ALL: [Collation; 3] = [Collation::Plain, Collation::Swedish, Collation::Danish];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Collation::Plain => "English and most languages (Å, Ä, Ö with A and O)",
+            Collation::Swedish => "Swedish, Finnish (… X Y Z Å Ä Ö)",
+            Collation::Danish => "Danish, Norwegian (… X Y Z Æ Ø Å)",
+        }
+    }
+
+    /// The order the system's language (LC_ALL, LC_COLLATE, LANG) asks for.
+    pub fn system() -> Collation {
+        static LANG: std::sync::OnceLock<Collation> = std::sync::OnceLock::new();
+        *LANG.get_or_init(|| {
+            let lang = ["LC_ALL", "LC_COLLATE", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty())).unwrap_or_default();
+            collation_for(&lang)
+        })
+    }
+}
+
+/// The order chosen in the settings: 0 follows the system, else 1 + index in `Collation::ALL`.
+/// Kept here rather than passed around because names are compared in many places.
+static CHOSEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Sets the name order (None: follow the system's language). Panes need `apply_view` to re-sort.
+pub fn set_collation(c: Option<Collation>) {
+    let n = c.map_or(0, |c| 1 + Collation::ALL.iter().position(|&x| x == c).unwrap_or(0) as u8);
+    CHOSEN.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn collation() -> Collation {
+    match CHOSEN.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => Collation::system(),
+        n => Collation::ALL[(n as usize - 1).min(2)],
+    }
+}
+
+fn collation_for(lang: &str) -> Collation {
+    match lang.split(['_', '.', '@', '-']).next().unwrap_or("") {
+        "sv" | "fi" => Collation::Swedish,
+        "da" | "nb" | "nn" | "no" => Collation::Danish,
+        _ => Collation::Plain,
+    }
+}
+
+/// The letters and digits of a name, in lower case without accents. Letters
+/// that come after z are given the codes just past 'z' (punctuation, which
+/// lives there in ASCII, has been dropped by then).
+fn sort_key(name: &str, lang: Collation) -> Vec<char> {
+    const AFTER_Z: [char; 3] = ['{', '|', '}'];
+    let mut out = Vec::with_capacity(name.len());
+    for c in name.chars().flat_map(char::to_lowercase) {
+        if !c.is_alphanumeric() && !c.is_whitespace() {
+            continue;
+        }
+        let nordic = match (lang, c) {
+            (Collation::Swedish, 'å') => Some(AFTER_Z[0]),
+            (Collation::Swedish, 'ä' | 'æ') => Some(AFTER_Z[1]),
+            (Collation::Swedish, 'ö' | 'ø') => Some(AFTER_Z[2]),
+            (Collation::Danish, 'æ' | 'ä') => Some(AFTER_Z[0]),
+            (Collation::Danish, 'ø' | 'ö') => Some(AFTER_Z[1]),
+            (Collation::Danish, 'å') => Some(AFTER_Z[2]),
+            (Collation::Swedish | Collation::Danish, 'ü') => Some('y'),
+            _ => None,
+        };
+        if let Some(n) = nordic {
+            out.push(n);
+            continue;
+        }
+        match base_letters(c) {
+            Some(base) => out.extend(base.chars()),
+            None => out.push(c),
+        }
+    }
+    out
+}
+
+/// The plain letters an accented Latin letter (lower case) sorts as.
+fn base_letters(c: char) -> Option<&'static str> {
+    Some(match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'æ' => "ae",
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
+        'ď' | 'đ' | 'ð' => "d",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+        'ĥ' | 'ħ' => "h",
+        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+        'ĵ' => "j",
+        'ķ' => "k",
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+        'ñ' | 'ń' | 'ņ' | 'ň' => "n",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => "o",
+        'œ' => "oe",
+        'ŕ' | 'ŗ' | 'ř' => "r",
+        'ś' | 'ŝ' | 'ş' | 'š' | 'ș' => "s",
+        'ß' => "ss",
+        'ţ' | 'ť' | 'ŧ' | 'ț' => "t",
+        'þ' => "th",
+        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
+        'ŵ' => "w",
+        'ý' | 'ÿ' | 'ŷ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        _ => return None,
+    })
+}
+
+/// Compares character by character, but runs of digits by their value.
+fn natural(a: &[char], b: &[char]) -> Ordering {
+    let (mut i, mut j) = (0, 0);
     loop {
-        match (ai.peek().copied(), bi.peek().copied()) {
+        match (a.get(i), b.get(j)) {
             (None, None) => return Ordering::Equal,
             (None, _) => return Ordering::Less,
             (_, None) => return Ordering::Greater,
             (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
-                let mut na = String::new();
-                while let Some(&c) = ai.peek() {
-                    if !c.is_ascii_digit() {
-                        break;
-                    }
-                    na.push(c);
-                    ai.next();
+                let (si, sj) = (i, j);
+                while a.get(i).is_some_and(char::is_ascii_digit) {
+                    i += 1;
                 }
-                let mut nb = String::new();
-                while let Some(&c) = bi.peek() {
-                    if !c.is_ascii_digit() {
-                        break;
-                    }
-                    nb.push(c);
-                    bi.next();
+                while b.get(j).is_some_and(char::is_ascii_digit) {
+                    j += 1;
                 }
-                let ta = na.trim_start_matches('0');
-                let tb = nb.trim_start_matches('0');
-                let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
+                let trim = |d: &[char]| d.iter().skip_while(|c| **c == '0').copied().collect::<Vec<_>>();
+                let (ta, tb) = (trim(&a[si..i]), trim(&b[sj..j]));
+                let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(&tb));
                 if ord != Ordering::Equal {
                     return ord;
                 }
             }
             (Some(x), Some(y)) => {
                 if x != y {
-                    return x.cmp(&y);
+                    return x.cmp(y);
                 }
-                ai.next();
-                bi.next();
+                i += 1;
+                j += 1;
             }
         }
     }
@@ -1052,6 +1176,24 @@ mod tests {
         assert_eq!(natural_cmp("file2", "file10"), Ordering::Less);
         assert_eq!(natural_cmp("B", "a"), Ordering::Greater);
         assert_eq!(natural_cmp("x", "x"), Ordering::Equal);
+        // Accents and punctuation don't count; their order is still fixed.
+        assert_eq!(natural_cmp("Éric Serra", "Eagles"), Ordering::Greater);
+        assert_eq!(natural_cmp("Éric Serra", "ZZ Top"), Ordering::Less);
+        assert_eq!(natural_cmp("“Weird Al” Yankovic", "Wolfmother"), Ordering::Less);
+        assert_eq!(natural_cmp("“Weird Al” Yankovic", "Van Halen"), Ordering::Greater);
+        assert_eq!(natural_cmp("...", "a"), Ordering::Less);
+        assert_ne!(natural_cmp("Eric", "Éric"), Ordering::Equal);
+        assert_eq!(natural_cmp("track 9", "Track 10"), Ordering::Less);
+        // Nordic letters, by language.
+        let order = |lang, names: &[&str]| {
+            let mut v = names.to_vec();
+            v.sort_by(|a, b| natural(&sort_key(a, lang), &sort_key(b, lang)));
+            v.join(" ")
+        };
+        let names = ["Öland", "Åre", "Zorn", "Ärla", "Oslo", "Øresund", "Aalto"];
+        assert_eq!(order(collation_for("sv_SE.UTF-8"), &names), "Aalto Oslo Zorn Åre Ärla Öland Øresund");
+        assert_eq!(order(collation_for("da_DK"), &names), "Aalto Oslo Zorn Ärla Öland Øresund Åre");
+        assert_eq!(order(collation_for("en_US.UTF-8"), &names), "Aalto Åre Ärla Öland Øresund Oslo Zorn");
     }
 
     #[test]

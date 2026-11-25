@@ -84,6 +84,9 @@ pub struct Settings {
     pub show_key_bar: bool,
     /// Show a ".." row at the top of every folder.
     pub show_dotdot: bool,
+    /// Where Å, Ä, Ö and the like go when sorting by name: "Plain", "Swedish" or
+    /// "Danish". None: follow the system's language.
+    pub sort_language: Option<crate::pane::Collation>,
     /// Lister: playback volume, 0.0 to 1.0.
     pub volume: f32,
     pub confirm_delete: bool,
@@ -151,6 +154,7 @@ impl Default for Settings {
             stripe_percent: None,
             show_key_bar: true,
             show_dotdot: true,
+            sort_language: None,
             volume: 0.8,
             confirm_delete: true,
             editor: String::new(),

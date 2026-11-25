@@ -965,6 +965,7 @@ impl App {
         s.right_path = Some(self.panes[1].path.clone());
         self.settings = s;
         theme::apply(ctx, &self.settings);
+        crate::pane::set_collation(self.settings.sort_language);
         let show = self.settings.show_hidden;
         for p in &mut self.panes {
             p.show_dotdot = self.settings.show_dotdot;

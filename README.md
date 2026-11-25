@@ -367,6 +367,12 @@ replaced with safely quoted values:
 
 Set `"editor"` (for F4) and `"terminal"` (for F9) if you don't want the defaults.
 
+**Name order.** Sorting by name ignores case, accents and punctuation (“Éric”
+sorts with the E's, “"Weird Al"” under W), and puts file2 before file10. Where
+Å, Ä, Ö, Æ and Ø go follows your system's language: after Z in Swedish, Finnish,
+Danish and Norwegian, with A and O elsewhere. To pick another order, use **Sort
+names** in Appearance (`"sort_language"`: `"Plain"`, `"Swedish"` or `"Danish"`).
+
 **New versions.** About once a day Duopane asks GitHub whether a newer release is
 out. If there is one, a "Duopane x.y.z is out" button shows at the right end of
 the key bar (and in the About box); it opens the download page. Nothing is

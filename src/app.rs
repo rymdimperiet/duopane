@@ -168,6 +168,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<PathBuf>) -> Self {
         let (settings, settings_error) = Settings::load();
+        crate::pane::set_collation(settings.sort_language);
         theme::apply(&cc.egui_ctx, &settings);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         // Lets the lister's Markdown view show pictures from files.
