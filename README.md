@@ -113,7 +113,9 @@ The mouse works too: click, Ctrl+click and Shift+click select, a double-click op
 right-click opens a menu, and clicking a column header sorts by it. Drag the gap
 between the panes to make one wider, or the edges between the column headers to
 resize Size and Modified; a double-click puts either back, and Ctrl+double-click
-resets them all. Both are remembered.
+resets them all. Both are remembered. The panes can also sit one above the
+other (Appearance → Panes, or “Panes side by side / one above the other” in the
+command palette).
 
 ### Drag and drop
 

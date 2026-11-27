@@ -245,7 +245,8 @@ impl App {
             Modal::Places(m) => {
                 let r = self.panes_rect.unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0)));
                 // Just below the path bar, at each pane's left edge.
-                let at = [r.min + vec2(8.0, 34.0), egui::pos2(crate::ui::pane_rects(r, self.settings.pane_split).2.left() + 8.0, r.top() + 34.0)];
+                let second = crate::ui::pane_rects(r, self.settings.pane_split, self.settings.stacked_panes).2;
+                let at = [r.min + vec2(8.0, 34.0), second.min + vec2(8.0, 34.0)];
                 if let Some(o) = m.ui(ctx, at) {
                     close = true;
                     places_pick = Some(o);
@@ -553,6 +554,12 @@ impl App {
 
                         ui.label("Bottom bar");
                         if ui.checkbox(&mut self.settings.show_key_bar, "Show the function-key bar (F2 Rename, F3 View…)").changed() {
+                            self.dirty = true;
+                        }
+                        ui.end_row();
+
+                        ui.label("Panes");
+                        if ui.checkbox(&mut self.settings.stacked_panes, "One above the other").changed() {
                             self.dirty = true;
                         }
                         ui.end_row();

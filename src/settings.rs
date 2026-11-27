@@ -55,8 +55,10 @@ pub struct Settings {
     /// Second sorts (Ctrl+Shift+3–6), and whether they run ascending.
     pub left_then: Option<(SortKey, bool)>,
     pub right_then: Option<(SortKey, bool)>,
-    /// Where the panes divide, as a share of the window for the left one.
+    /// Where the panes divide, as a share of the window for the left (or top) one.
     pub pane_split: f32,
+    /// The panes one above the other instead of side by side.
+    pub stacked_panes: bool,
     /// Widths of the Size and Modified columns (dragged in the column headers).
     pub columns: ColumnWidths,
     pub font_size: f32,
@@ -140,6 +142,7 @@ impl Default for Settings {
             left_then: None,
             right_then: None,
             pane_split: 0.5,
+            stacked_panes: false,
             columns: ColumnWidths::default(),
             font_size: 14.0,
             color_scheme: "Duopane Dark".into(),

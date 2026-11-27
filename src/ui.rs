@@ -202,8 +202,8 @@ impl App {
                 let (left, right) = self.panes.split_at_mut(1);
                 let actions = &mut self.actions;
                 let quick_view = &mut self.quick_view;
-                let (split, columns) = (self.settings.pane_split, self.settings.columns);
-                let rects = pane_rects(ui.max_rect(), split);
+                let (split, columns, stacked) = (self.settings.pane_split, self.settings.columns, self.settings.stacked_panes);
+                let rects = pane_rects(ui.max_rect(), split, stacked);
                 let panes = [(&mut left[0], b0), (&mut right[0], b1)];
                 for (idx, (pane, bookmarked)) in panes.into_iter().enumerate() {
                     let col = &mut ui.new_child(egui::UiBuilder::new().max_rect([rects.0, rects.2][idx]));
@@ -212,7 +212,7 @@ impl App {
                         _ => pane_ui(col, pane, idx, active == idx, bookmarked, &mut self.settings.columns, actions),
                     }
                 }
-                pane_divider(ui, rects.1, ui.max_rect(), &mut self.settings.pane_split, actions);
+                pane_divider(ui, rects.1, ui.max_rect(), stacked, &mut self.settings.pane_split, actions);
                 if self.settings.pane_split != split || self.settings.columns != columns {
                     self.dirty = true;
                 }
@@ -223,17 +223,30 @@ impl App {
     /// Which pane a point is over.
     pub(crate) fn pane_at(&self, p: egui::Pos2) -> Option<usize> {
         let r = self.panes_rect?;
-        Some(usize::from(p.x > pane_rects(r, self.settings.pane_split).1.center().x))
+        let stacked = self.settings.stacked_panes;
+        let mid = pane_rects(r, self.settings.pane_split, stacked).1.center();
+        Some(usize::from(if stacked { p.y > mid.y } else { p.x > mid.x }))
     }
 }
 
 /// The room between the panes, which is also the handle for moving it.
 const DIVIDER: f32 = 6.0;
-/// The narrowest a pane can be made.
+/// The narrowest a pane can be made, side by side and stacked.
 const MIN_PANE: f32 = 220.0;
+const MIN_PANE_HEIGHT: f32 = 120.0;
 
-/// The left pane, the divider and the right pane.
-pub(crate) fn pane_rects(r: egui::Rect, split: f32) -> (egui::Rect, egui::Rect, egui::Rect) {
+/// The first pane, the divider and the second pane: side by side, or with
+/// `stacked` one above the other.
+pub(crate) fn pane_rects(r: egui::Rect, split: f32, stacked: bool) -> (egui::Rect, egui::Rect, egui::Rect) {
+    if stacked {
+        let room = (r.height() - DIVIDER).max(0.0);
+        let y = (r.top() + room * split.clamp(0.0, 1.0)).round();
+        return (
+            egui::Rect::from_min_max(r.min, pos2(r.right(), y)),
+            egui::Rect::from_min_max(pos2(r.left(), y), pos2(r.right(), y + DIVIDER)),
+            egui::Rect::from_min_max(pos2(r.left(), y + DIVIDER), r.max),
+        );
+    }
     let room = (r.width() - DIVIDER).max(0.0);
     let x = (r.left() + room * split.clamp(0.0, 1.0)).round();
     let divider = egui::Rect::from_min_max(pos2(x, r.top()), pos2(x + DIVIDER, r.bottom()));
@@ -246,13 +259,16 @@ pub(crate) fn pane_rects(r: egui::Rect, split: f32) -> (egui::Rect, egui::Rect, 
 
 /// Dragging the gap between the panes moves it; a double click puts it back in the middle.
 /// Ctrl+double-click resets every size (the "reset_layout" command).
-fn pane_divider(ui: &mut egui::Ui, rect: egui::Rect, area: egui::Rect, split: &mut f32, actions: &mut Vec<Action>) {
-    let r = ui.interact(rect.expand2(vec2(2.0, 0.0)), egui::Id::new("pane_divider"), Sense::click_and_drag());
-    let room = (area.width() - DIVIDER).max(1.0);
-    let least = (MIN_PANE / room).min(0.5);
+fn pane_divider(ui: &mut egui::Ui, rect: egui::Rect, area: egui::Rect, stacked: bool, split: &mut f32, actions: &mut Vec<Action>) {
+    let grab = if stacked { vec2(0.0, 2.0) } else { vec2(2.0, 0.0) };
+    let r = ui.interact(rect.expand2(grab), egui::Id::new("pane_divider"), Sense::click_and_drag());
+    let (length, least_px, start) = if stacked { (area.height(), MIN_PANE_HEIGHT, area.top()) } else { (area.width(), MIN_PANE, area.left()) };
+    let room = (length - DIVIDER).max(1.0);
+    let least = (least_px / room).min(0.5);
     if r.dragged() {
         if let Some(p) = r.interact_pointer_pos() {
-            *split = ((p.x - DIVIDER / 2.0 - area.left()) / room).clamp(least, 1.0 - least);
+            let at = if stacked { p.y } else { p.x };
+            *split = ((at - DIVIDER / 2.0 - start) / room).clamp(least, 1.0 - least);
         }
     }
     if r.double_clicked() {
@@ -262,9 +278,14 @@ fn pane_divider(ui: &mut egui::Ui, rect: egui::Rect, area: egui::Rect, split: &m
         *split = 0.5;
     }
     if r.hovered() || r.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        let x = rect.center().x;
-        ui.painter().vline(x, area.y_range().shrink(area.height() * 0.3), Stroke::new(2.0_f32, theme::c().dim.gamma_multiply(0.6)));
+        let stroke = Stroke::new(2.0_f32, theme::c().dim.gamma_multiply(0.6));
+        if stacked {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            ui.painter().hline(area.x_range().shrink(area.width() * 0.3), rect.center().y, stroke);
+        } else {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            ui.painter().vline(rect.center().x, area.y_range().shrink(area.height() * 0.3), stroke);
+        }
     }
     let _ = r.on_hover_text_at_pointer("Drag to move. Double-click: back to the middle.\nCtrl+double-click: reset the columns too.");
 }
@@ -1110,14 +1131,31 @@ mod tests {
         let ctx = egui::Context::default();
         let area = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0));
         let mut split = 0.5;
-        let at = pane_rects(area, split).1.center();
-        drag_across(&ctx, at, at - vec2(200.0, 0.0), |ui| pane_divider(ui, pane_rects(area, split).1, area, &mut split, &mut Vec::new()));
-        let left = pane_rects(area, split).0;
+        let at = pane_rects(area, split, false).1.center();
+        drag_across(&ctx, at, at - vec2(200.0, 0.0), |ui| pane_divider(ui, pane_rects(area, split, false).1, area, false, &mut split, &mut Vec::new()));
+        let left = pane_rects(area, split, false).0;
         assert!((left.width() - 297.0).abs() < 2.0, "left pane is {}", left.width());
         // It can't squeeze a pane to nothing.
-        let at = pane_rects(area, split).1.center();
-        drag_across(&ctx, at, pos2(5.0, at.y), |ui| pane_divider(ui, pane_rects(area, split).1, area, &mut split, &mut Vec::new()));
-        assert!(pane_rects(area, split).0.width() >= MIN_PANE - 1.0);
+        let at = pane_rects(area, split, false).1.center();
+        drag_across(&ctx, at, pos2(5.0, at.y), |ui| pane_divider(ui, pane_rects(area, split, false).1, area, false, &mut split, &mut Vec::new()));
+        assert!(pane_rects(area, split, false).0.width() >= MIN_PANE - 1.0);
+    }
+
+    #[test]
+    fn stacked_panes_divide_up_and_down() {
+        let ctx = egui::Context::default();
+        let area = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0));
+        let (top, gap, bottom) = pane_rects(area, 0.5, true);
+        assert_eq!((top.width(), bottom.width()), (1000.0, 1000.0));
+        assert!(top.bottom() <= gap.top() && gap.bottom() <= bottom.top());
+        let mut split = 0.5;
+        let at = pane_rects(area, split, true).1.center();
+        drag_across(&ctx, at, at - vec2(0.0, 100.0), |ui| pane_divider(ui, pane_rects(area, split, true).1, area, true, &mut split, &mut Vec::new()));
+        let top = pane_rects(area, split, true).0;
+        assert!((top.height() - 197.0).abs() < 2.0, "top pane is {}", top.height());
+        let at = pane_rects(area, split, true).1.center();
+        drag_across(&ctx, at, pos2(at.x, 5.0), |ui| pane_divider(ui, pane_rects(area, split, true).1, area, true, &mut split, &mut Vec::new()));
+        assert!(pane_rects(area, split, true).0.height() >= MIN_PANE_HEIGHT - 1.0);
     }
 
     #[test]
@@ -1147,13 +1185,13 @@ mod tests {
         let area = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0));
         let mut split = 0.3;
         let mut actions = Vec::new();
-        let at = pane_rects(area, split).1.center();
+        let at = pane_rects(area, split, false).1.center();
         let ctrl = egui::Modifiers::CTRL;
         let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: ctrl };
         for (n, events) in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], vec![button(true)], vec![button(false)]].into_iter().enumerate() {
             let input = RawInput { screen_rect: Some(area), events, modifiers: ctrl, time: Some(n as f64 * 0.05), ..Default::default() };
             let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| pane_divider(ui, pane_rects(area, split).1, area, &mut split, &mut actions));
+                egui::CentralPanel::default().show(ctx, |ui| pane_divider(ui, pane_rects(area, split, false).1, area, false, &mut split, &mut actions));
             });
         }
         assert_eq!(split, 0.5);

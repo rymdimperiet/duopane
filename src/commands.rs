@@ -51,6 +51,10 @@ pub fn builtin() -> Vec<Command> {
             a.settings.show_key_bar = !a.settings.show_key_bar;
             a.dirty = true;
         }),
+        cmd!("toggle_stacked", "Panes side by side / one above the other", [], |a, _| {
+            a.settings.stacked_panes = !a.settings.stacked_panes;
+            a.dirty = true;
+        }),
         cmd!("reset_layout", "Reset pane and column sizes", [], |a, _| {
             a.settings.pane_split = 0.5;
             a.settings.columns = Default::default();
