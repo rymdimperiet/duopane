@@ -98,6 +98,26 @@ struct Mount {
     options: String,
 }
 
+/// The network mount (sshfs, NFS, SMB, …) that `path` is on: its folder and what
+/// it's a connection to, e.g. "me@nas:/srv".
+pub fn network_mount_of(path: &Path) -> Option<(PathBuf, String)> {
+    #[cfg(target_os = "linux")]
+    {
+        let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+        parse_mountinfo(&info)
+            .into_iter()
+            .filter(|m| path.starts_with(&m.point))
+            .max_by_key(|m| m.point.as_os_str().len())
+            .filter(|m| NETWORK.contains(&m.fstype.as_str()))
+            .map(|m| (m.point, m.source))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Mount points escape spaces and a few other characters as octal (`\040`).
 fn unescape(s: &str) -> String {
     let b = s.as_bytes();
@@ -936,7 +956,11 @@ fn run_unmount(p: &Place) -> Result<Done, MountError> {
     let ours = dir.starts_with(mounts_dir());
     let command = if ours { None } else { fuse_command(dir) };
     let point = dir.to_string_lossy().into_owned();
-    output("fusermount3", &["-u", &point]).or_else(|_| output("fusermount", &["-u", &point]))?;
+    output("fusermount3", &["-u", &point])
+        .or_else(|_| output("fusermount", &["-u", &point]))
+        // A connection that stopped answering keeps the mount busy; let go of it anyway.
+        .or_else(|_| output("fusermount3", &["-uz", &point]))
+        .or_else(|_| output("fusermount", &["-uz", &point]))?;
     if ours {
         // The mount folder goes too (only if it's empty).
         let _ = std::fs::remove_dir(dir);

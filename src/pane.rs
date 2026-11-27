@@ -104,6 +104,8 @@ pub struct Pane {
     pub(crate) want_cursor: Option<String>,
     /// How long to wait for a read before going on in the background ([`LOAD_WAIT`]).
     load_wait: Duration,
+    /// The background look at whether the folder changed on disk: which path, the answer, when it was asked.
+    probe: Option<(PathBuf, mpsc::Receiver<Option<SystemTime>>, Instant)>,
     /// Set while showing search results instead of a folder ("feed to listbox").
     /// `path` is then the folder that was searched.
     pub results: Option<Arc<ResultSet>>,
@@ -170,6 +172,7 @@ impl Pane {
             loading: None,
             want_cursor: None,
             load_wait: LOAD_WAIT,
+            probe: None,
             results: None,
         };
         let fallbacks = [
@@ -451,7 +454,9 @@ impl Pane {
 
     /// Opens another folder, remembering where we came from.
     pub fn navigate(&mut self, path: &Path) -> Result<(), String> {
-        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        // Resolving links touches the disk, which can hang on a network folder whose server is gone.
+        let p = path.to_path_buf();
+        let path = within(Duration::from_millis(100), move || fs::canonicalize(&p).ok()).flatten().unwrap_or_else(|| path.to_path_buf());
         if path == self.path && self.results.is_none() {
             self.loading = None; // e.g. clicked back to here while another folder was loading
             self.reload();
@@ -547,14 +552,42 @@ impl Pane {
         }
     }
 
-    /// True when the folder changed on disk since it was read.
-    pub fn changed_on_disk(&self) -> bool {
-        if self.results.is_some() {
-            return false; // results are re-checked after file operations instead
+    /// Called about once a second: reloads the folder if it changed on disk since it
+    /// was read. The look happens on another thread, as it can hang on a network
+    /// folder whose server is gone. While another folder is being read, that one
+    /// is looked at instead: a big folder can take long to read, but a working
+    /// server answers a single look quickly. Returns the folder that has kept us
+    /// waiting for an answer, and for how long, if one has.
+    pub fn watch_disk(&mut self) -> Option<(PathBuf, Duration)> {
+        let watched = match (&self.loading, &self.archive) {
+            (Some(l), _) => l.path.clone(),
+            _ if self.results.is_some() => return None, // results are re-checked after file operations instead
+            (None, Some(a)) => a.file.clone(),
+            (None, None) => self.path.clone(),
+        };
+        if let Some((path, rx, since)) = &self.probe {
+            if *path == watched {
+                match rx.try_recv() {
+                    Ok(now) => {
+                        self.probe = None;
+                        if now != self.dir_mtime {
+                            self.reload();
+                        }
+                        return None;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => return Some((watched, since.elapsed())),
+                    Err(mpsc::TryRecvError::Disconnected) => {}
+                }
+            }
         }
-        let watched = self.archive.as_ref().map(|a| a.file.as_path()).unwrap_or(&self.path);
-        let now = fs::metadata(watched).and_then(|m| m.modified()).ok();
-        now != self.dir_mtime
+        // A look at a folder we've since left is dropped (if it hangs, it hangs on its own).
+        let (tx, rx) = mpsc::channel();
+        let p = watched.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(fs::metadata(&p).and_then(|m| m.modified()).ok());
+        });
+        self.probe = Some((watched, rx, Instant::now()));
+        None
     }
 
     pub fn cursor_entry(&self) -> Option<&Entry> {
@@ -934,6 +967,17 @@ fn fetch_archive(path: &Path, file: &Path, cache: IndexCache) -> Result<Fetched,
     Ok(Fetched::Archive { all, state: ArchiveState { file: file.to_path_buf(), index, mtime } })
 }
 
+/// Runs `f` on a thread of its own and waits up to `wait` for the answer. For disk
+/// access on the UI thread that could hang on a network folder whose server is
+/// gone: a call that doesn't finish in time is left behind to finish on its own.
+pub fn within<T: Send + 'static>(wait: Duration, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(wait).ok()
+}
+
 /// If `path` is an archive file, or a folder inside one, returns the archive file.
 fn archive_file_in(path: &Path) -> Option<PathBuf> {
     let mut p = Some(path);
@@ -1220,6 +1264,37 @@ mod tests {
     }
 
     #[test]
+    fn changes_on_disk_are_noticed_without_waiting_on_the_disk() {
+        let dir = std::env::temp_dir().join(format!("duopane-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old.txt"), "x").unwrap();
+        let mut p = Pane::new(&dir, false, false, SortKey::Name, true);
+        assert!(p.entries.iter().any(|e| e.name == "old.txt"));
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(dir.join("new.txt"), "x").unwrap();
+        let t = Instant::now();
+        while !p.entries.iter().any(|e| e.name == "new.txt") {
+            // Never waits for the answer itself; it comes back on a later call.
+            let call = Instant::now();
+            let waited = p.watch_disk();
+            assert!(call.elapsed() < Duration::from_millis(50));
+            assert!(waited.is_none_or(|(path, _)| path == dir), "only this folder is looked at");
+            let _ = p.poll_loading();
+            assert!(t.elapsed() < Duration::from_secs(5), "the new file never showed up");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn within_gives_up_on_calls_that_hang() {
+        assert_eq!(within(Duration::from_secs(5), || 7), Some(7));
+        assert_eq!(within(Duration::from_millis(20), || std::thread::sleep(Duration::from_secs(2))), None);
+        assert_eq!(crate::places::network_mount_of(&std::env::temp_dir().join("x")).map(|m| m.1), None);
+    }
+
+    #[test]
     fn filter_same_type_and_compare() {
         let base = std::env::temp_dir().join(format!("duopane-filter-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -1455,7 +1530,7 @@ mod tests {
         assert_eq!(p.entries[2].size, 2);
         p.select_all();
         assert_eq!(p.targets(), vec![dir.join("a/x.txt"), dir.join("b/x.txt")]);
-        assert!(!p.changed_on_disk());
+        assert_eq!(p.watch_disk(), None);
 
         // After a file operation, results are re-checked.
         fs::remove_file(dir.join("a/x.txt")).unwrap();

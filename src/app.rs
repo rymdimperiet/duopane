@@ -317,6 +317,15 @@ impl App {
         self.after_move(idx, r);
     }
 
+    /// A pane's folder is on a network mount that has stopped answering: go home
+    /// rather than sit in it, and say how to let go of the connection.
+    fn leave_dead_connection(&mut self, idx: usize, dir: &Path) {
+        let Some((_, what)) = crate::places::network_mount_of(dir) else { return };
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        self.navigate(idx, &home);
+        self.set_status(format!("{what} stopped answering, so the pane went home. To disconnect, press Del on it in the drive menu (Alt+F1)."), true);
+    }
+
     pub(crate) fn after_move(&mut self, idx: usize, res: Result<(), String>) {
         match res {
             // Still reading in the background: this runs again when it arrives.
@@ -470,9 +479,9 @@ impl App {
         }
         if self.last_check.elapsed() > Duration::from_millis(1000) {
             self.last_check = Instant::now();
-            for p in &mut self.panes {
-                if p.changed_on_disk() {
-                    p.reload();
+            for i in 0..2 {
+                if let Some((dir, _)) = self.panes[i].watch_disk().filter(|(_, w)| *w > DEAD_CONNECTION) {
+                    self.leave_dead_connection(i, &dir);
                 }
             }
         }
@@ -904,6 +913,9 @@ fn native_drag(cc: &eframe::CreationContext<'_>) -> Option<crate::native_drag::N
     let window = cc.window_handle().ok()?.as_raw();
     crate::native_drag::NativeDrag::new(display, window, cc.egui_ctx.clone())
 }
+
+/// How long a network folder may keep us waiting before the pane leaves it.
+const DEAD_CONNECTION: Duration = Duration::from_secs(8);
 
 // ----- small utilities -----------------------------------------------------
 

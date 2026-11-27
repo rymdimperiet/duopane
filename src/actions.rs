@@ -1020,42 +1020,55 @@ impl App {
 
     /// "Go to": bookmarks and often-visited folders rank first.
     pub fn open_goto(&mut self, _ctx: &egui::Context) {
-        let mut found: BTreeMap<PathBuf, i32> = BTreeMap::new();
-        let mut add = |p: PathBuf, boost: i32| {
+        fn add(found: &mut BTreeMap<PathBuf, i32>, p: PathBuf, boost: i32) {
             let e = found.entry(p).or_insert(i32::MIN);
             *e = (*e).max(boost);
-        };
+        }
+        let mut found: BTreeMap<PathBuf, i32> = BTreeMap::new();
         for b in &self.settings.bookmarks {
-            add(b.clone(), 400);
+            add(&mut found, b.clone(), 400);
         }
         for (k, v) in &self.settings.visited {
-            add(PathBuf::from(k), 40 + ((*v as f32).ln() * 60.0) as i32);
+            add(&mut found, PathBuf::from(k), 40 + ((*v as f32).ln() * 60.0) as i32);
         }
-        if let Some(h) = dirs::home_dir() {
-            add(h.clone(), 60);
-            for d in subdirs(&h, false) {
-                add(d, 20);
-            }
+        let home = dirs::home_dir();
+        if let Some(h) = &home {
+            add(&mut found, h.clone(), 60);
         }
         for pane in &self.panes {
-            for d in subdirs(&pane.path, pane.show_hidden) {
-                add(d, 30);
-            }
             for a in pane.path.ancestors().skip(1) {
-                add(a.to_path_buf(), 25);
+                add(&mut found, a.to_path_buf(), 25);
             }
         }
-        add(PathBuf::from("/"), 0);
-        for root in ["/media", "/mnt", "/run/media"] {
-            for d in subdirs(Path::new(root), false) {
-                add(d.clone(), 15);
-                for dd in subdirs(&d, false) {
-                    add(dd, 15);
+        add(&mut found, PathBuf::from("/"), 0);
+        // Subfolders, and leaving out folders that are gone, need the disk, which
+        // can hang on a network folder whose server has gone: then the list is
+        // shown without them.
+        let panes: Vec<(PathBuf, bool)> = self.panes.iter().map(|p| (p.path.clone(), p.show_hidden)).collect();
+        let quick = found.clone();
+        let looked = crate::pane::within(std::time::Duration::from_millis(400), move || {
+            if let Some(h) = &home {
+                for d in subdirs(h, false) {
+                    add(&mut found, d, 20);
                 }
             }
-        }
-        let base: Vec<PaletteItem> =
-            found.into_iter().filter(|(p, _)| p.is_dir()).map(|(p, boost)| dir_item(p, boost)).collect();
+            for (path, hidden) in &panes {
+                for d in subdirs(path, *hidden) {
+                    add(&mut found, d, 30);
+                }
+            }
+            for root in ["/media", "/mnt", "/run/media"] {
+                for d in subdirs(Path::new(root), false) {
+                    add(&mut found, d.clone(), 15);
+                    for dd in subdirs(&d, false) {
+                        add(&mut found, dd, 15);
+                    }
+                }
+            }
+            found.into_iter().filter(|(p, _)| p.is_dir()).collect::<Vec<_>>()
+        });
+        let found = looked.unwrap_or_else(|| quick.into_iter().collect());
+        let base: Vec<PaletteItem> = found.into_iter().map(|(p, boost)| dir_item(p, boost)).collect();
         self.modal = Some(Modal::Palette(PaletteState::new(PaletteKind::GoTo, base)));
     }
 
