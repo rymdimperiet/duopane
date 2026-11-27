@@ -84,7 +84,7 @@ mod tests {
     fn every_icon_is_in_the_bundled_font() {
         let ctx = eframe::egui::Context::default();
         crate::theme::apply_fonts(&ctx, ("", 400), ("", 400));
-        let _ = ctx.run(Default::default(), |_| {});
+        ctx.run_pass(Default::default(), |_| {}).drop_without_applying_deltas();
         let src = include_str!("icons.rs");
         let font = crate::theme::icon_font(&ctx, 14.0).expect("the icon font is loaded");
         let mut n = 0;
@@ -92,7 +92,7 @@ mod tests {
             let hex = &part[..part.find('}').unwrap()];
             let c = char::from_u32(u32::from_str_radix(hex, 16).unwrap()).unwrap();
             if c != '\0' {
-                assert!(ctx.fonts(|f| f.has_glyph(&font, c)), "icon U+{hex} is missing: run packaging/make-icon-font.sh");
+                assert!(ctx.fonts_mut(|f| f.has_glyph(&font, c)), "icon U+{hex} is missing: run packaging/make-icon-font.sh");
                 n += 1;
             }
         }

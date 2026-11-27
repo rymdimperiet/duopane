@@ -809,7 +809,7 @@ impl PlacesMenu {
 
         let mut outcome = None;
         let th = theme::c();
-        let area = egui::Area::new(egui::Id::new("places_menu")).order(egui::Order::Foreground).fixed_pos(at[self.pane]);
+        let area = egui::Area::new(egui::Id::unique("places_menu")).order(egui::Order::Foreground).fixed_pos(at[self.pane]);
         let r = area.show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_width(460.0);
@@ -1217,7 +1217,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = None;
-        let _ = ctx.run(input, |ctx| out = m.ui(ctx, [pos2(10.0, 40.0), pos2(610.0, 40.0)]));
+        ctx.run_pass(input, |ctx| out = m.ui(ctx, [pos2(10.0, 40.0), pos2(610.0, 40.0)])).drop_without_applying_deltas();
         out
     }
 

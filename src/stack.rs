@@ -338,7 +338,8 @@ impl StackView {
     /// The frame under the panes, while anything is on the stack. `dest` is where
     /// its items would go. Returns whether the list changed, and anything a click
     /// asked for.
-    pub fn ui(&mut self, ctx: &egui::Context, stack: &mut Vec<PathBuf>, font_size: f32, dest: Option<Dest>) -> (bool, Option<StackAction>) {
+    pub fn ui(&mut self, root: &mut egui::Ui, stack: &mut Vec<PathBuf>, font_size: f32, dest: Option<Dest>) -> (bool, Option<StackAction>) {
+        let ctx = &root.ctx().clone();
         self.tidy(stack);
         if stack.is_empty() {
             return (false, None);
@@ -351,13 +352,13 @@ impl StackView {
         let header_h = row_h + 4.0;
         let mut changed = false;
         let mut action = None;
-        egui::TopBottomPanel::bottom("stack")
+        egui::Panel::bottom("stack")
             .resizable(true)
-            .default_height(header_h + row_h * 4.0 + 12.0)
-            .height_range((header_h + row_h + 12.0)..=(header_h + row_h * 20.0 + 12.0))
+            .default_size(header_h + row_h * 4.0 + 12.0)
+            .size_range((header_h + row_h + 12.0)..=(header_h + row_h * 20.0 + 12.0))
             .frame(egui::Frame::default().fill(th.bg).inner_margin(egui::Margin { left: 6, right: 6, top: 4, bottom: 4 }))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 // The accent border while the keyboard is here, as an active pane has.
                 let edge = if self.focused { th.accent } else { th.border };
                 let frame = egui::Frame::default().fill(th.pane).stroke(Stroke::new(1.0_f32, edge)).corner_radius(4.0);
@@ -383,7 +384,7 @@ impl StackView {
                     let clear_w = 54.0;
                     let clear = egui::Rect::from_center_size(pos2(head.right() - 8.0 - clear_w / 2.0, y), vec2(clear_w, header_h - 8.0));
                     let mut room = egui::Rect::from_min_max(pos2(title_r.right() + 20.0, head.top()), pos2(clear.left() - 12.0, head.bottom()));
-                    let width_of = |ui: &egui::Ui, t: &str| ui.fonts(|f| f.layout_no_wrap(t.to_string(), small.clone(), th.dim).size().x);
+                    let width_of = |ui: &egui::Ui, t: &str| ui.ctx().fonts_mut(|f| f.layout_no_wrap(t.to_string(), small.clone(), th.dim).size().x);
                     // Where it goes, and whether it fits there.
                     if let Some(d) = &dest {
                         let free = self.free.filter(|_| current);
@@ -512,7 +513,7 @@ impl StackView {
                                     paint.with_clip_rect(clip).text(pos2(folder_left, y), Align2::LEFT_CENTER, folder, small.clone(), th.dim);
                                 }
                             }
-                            let x = ui.interact(x_rect, ui.id().with(("stack_x", i)), Sense::click());
+                            let x = ui.interact(x_rect, ui.scope_id().with(("stack_x", i)), Sense::click());
                             if resp.hovered() || x.hovered() {
                                 let c = if x.hovered() { th.error } else { th.dim };
                                 paint.text(x_rect.center(), Align2::CENTER_CENTER, "×", body.clone(), c);
@@ -592,12 +593,12 @@ mod tests {
             };
             let input = RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 600.0))), events, ..Default::default() };
             let mut panel = Rect::NOTHING;
-            let _ = ctx.run(input, |ctx| {
-                let (changed, _) = view.ui(ctx, &mut stack, 14.0, None);
+            ctx.run_ui(input, |root| {
+                let (changed, _) = view.ui(root, &mut stack, 14.0, None);
                 assert_eq!(changed, step == 3, "only the click changes the list");
-                panel = ctx.available_rect();
-                egui::CentralPanel::default().show(ctx, |_| {});
-            });
+                panel = root.available_rect_before_wrap();
+                egui::CentralPanel::default().show(root, |_| {});
+            }).drop_without_applying_deltas();
             // The first row is just under the header; its × is at the right end.
             assert!(panel.bottom() < 600.0, "the frame takes room under the panes");
             let row_h = (14.0_f32 * 1.55).round();

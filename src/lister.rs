@@ -132,7 +132,7 @@ impl Scroll {
             None => area,
         };
         let out = area.show(ui, add);
-        self.offset = out.state.offset;
+        self.offset = out.state.clamped_offset();
         self.view = out.inner_rect.size();
         self.max = (out.content_size - out.inner_rect.size()).max(Vec2::ZERO);
     }
@@ -172,7 +172,8 @@ impl Lister {
     }
 
     /// Draws the lister; returns what the app should do next.
-    pub fn ui(&mut self, ctx: &egui::Context, volume: &mut f32) -> ListerAction {
+    pub fn ui(&mut self, root: &mut egui::Ui, volume: &mut f32) -> ListerAction {
+        let ctx = &root.ctx().clone();
         self.poll(ctx, *volume);
         if self.dark == theme::c().light {
             // Colour scheme switched between light and dark: re-colour the code.
@@ -186,9 +187,9 @@ impl Lister {
         let th = theme::c();
         let mut action = ListerAction::None;
 
-        egui::TopBottomPanel::top("lister_top")
+        egui::Panel::top("lister_top")
             .frame(egui::Frame::default().fill(th.header).inner_margin(egui::Margin::symmetric(10, 6)))
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Close  Esc").clicked() {
@@ -241,13 +242,13 @@ impl Lister {
                 });
             });
 
-        egui::TopBottomPanel::bottom("lister_bottom")
+        egui::Panel::bottom("lister_bottom")
             .frame(egui::Frame::default().fill(th.bg).inner_margin(egui::Margin::symmetric(10, 4)))
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(f) = &mut self.find {
                         ui.label("Find:");
-                        let r = ui.add(egui::TextEdit::singleline(&mut f.query).id(egui::Id::new("lister_find")).desired_width(240.0));
+                        let r = ui.add(egui::TextEdit::singleline(&mut f.query).id(egui::Id::unique("lister_find")).desired_width(240.0));
                         if f.focus {
                             r.request_focus();
                             f.focus = false;
@@ -256,7 +257,7 @@ impl Lister {
                         ui.label(egui::RichText::new(&f.message).color(th.dim).small());
                         if go {
                             self.find_next();
-                            ctx.memory_mut(|m| m.request_focus(egui::Id::new("lister_find")));
+                            ctx.memory_mut(|m| m.request_focus(egui::Id::unique("lister_find")));
                         }
                     } else {
                         let hint = match &self.content {
@@ -273,7 +274,7 @@ impl Lister {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(th.pane).inner_margin(0.0))
-            .show(ctx, |ui| match &mut self.content {
+            .show(root, |ui| match &mut self.content {
                 Content::Loading(_) => {
                     ui.centered_and_justified(|ui| ui.label(egui::RichText::new("Loading…").color(th.dim)));
                     ctx.request_repaint_after(Duration::from_millis(50));
@@ -382,7 +383,7 @@ impl Lister {
     }
 
     fn keys(&mut self, ctx: &egui::Context, volume: &mut f32) -> ListerAction {
-        let typing = ctx.wants_keyboard_input();
+        let typing = ctx.egui_wants_keyboard_input();
         // Keep focus off buttons so Space and Enter stay lister keys.
         if !typing {
             if let Some(id) = ctx.memory(|m| m.focused()) {
@@ -632,16 +633,16 @@ impl Lister {
                 });
             });
         });
-        self.offset = out.state.offset.y;
+        self.offset = out.state.clamped_offset().y;
         self.view_h = out.inner_rect.height();
     }
 
     fn text_ui(&mut self, ui: &mut egui::Ui) {
         let th = theme::c();
         let font = egui::TextStyle::Monospace.resolve(ui.style());
-        let row_h = ui.fonts(|f| f.row_height(&font)) + 2.0;
+        let row_h = ui.ctx().fonts_mut(|f| f.row_height(&font)) + 2.0;
         LAST_ROW_H.with(|r| r.set(row_h));
-        let char_w = ui.fonts(|f| f.glyph_width(&font, 'M')).max(1.0);
+        let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M')).max(1.0);
         let avail_w = ui.available_width();
         let hit = self.find.as_ref().and_then(|f| f.hit.map(|h| (h, f.query.chars().count())));
 
@@ -700,7 +701,7 @@ impl Lister {
                             None => (r, 0, usize::MAX),
                         };
                         let job = line_job(doc, line, a, b, &font, th.text, hit);
-                        let galley = ui.fonts(|f| f.layout_job(job));
+                        let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
                         let w = gutter + galley.size().x + 16.0;
                         let (rect, _) = ui.allocate_exact_size(vec2(w.max(avail_w), row_h), Sense::hover());
                         if hit.is_some_and(|((l, _), _)| l == line) {
@@ -721,7 +722,7 @@ impl Lister {
             }
             _ => return,
         };
-        self.offset = out.state.offset.y;
+        self.offset = out.state.clamped_offset().y;
         self.view_h = out.inner_rect.height();
     }
 }
@@ -972,14 +973,14 @@ mod scroll_tests {
     #[test]
     fn arrows_move_round_a_zoomed_picture() {
         let ctx = egui::Context::default();
-        let img = ColorImage::new([400, 300], Color32::GRAY);
+        let img = ColorImage::filled([400, 300], Color32::GRAY);
         let tex = ctx.load_texture("t", img, TextureOptions::LINEAR);
         let (mut zoom, mut fit, mut scroll) = (Some(4.0), 1.0, Scroll::default());
         let mut frame = |scroll: &mut Scroll| {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))), ..Default::default() };
-            let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| image_ui(ui, &tex, &mut zoom, &mut fit, scroll));
-            });
+            ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| image_ui(ui, &tex, &mut zoom, &mut fit, scroll));
+            }).drop_without_applying_deltas();
         };
         frame(&mut scroll);
         assert!(scroll.max.x > 0.0 && scroll.max.y > 0.0, "1600×1200 doesn't fit in 800×600");
@@ -1022,9 +1023,9 @@ mod scroll_tests {
         let mut frame = |l: &mut Lister, key: Option<Key>| {
             let events = key.map(|key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }).into_iter().collect();
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 700.0))), events, ..Default::default() };
-            let _ = ctx.run(input, |ctx| {
-                l.ui(ctx, &mut vol);
-            });
+            ctx.run_ui(input, |root| {
+                l.ui(root, &mut vol);
+            }).drop_without_applying_deltas();
         };
         let page = |l: &Lister| match &l.content {
             Content::Pdf(p) => Some((p.page, p.tex.as_ref().map(|t| t.0))),

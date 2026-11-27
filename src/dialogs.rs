@@ -119,7 +119,7 @@ pub fn dir_item(p: PathBuf, boost: i32) -> PaletteItem {
 
 pub(crate) fn dialog<'a>(title: &str) -> egui::Window<'a> {
     egui::Window::new(title.to_string())
-        .id(egui::Id::new("modal_dialog"))
+        .id(egui::Id::unique("modal_dialog"))
         .collapsible(false)
         .resizable(false)
         .order(egui::Order::Foreground)
@@ -137,8 +137,8 @@ impl App {
         // Dim the window behind the dialog (not behind the drive menu, which
         // marks the panes' places and is better read next to them).
         if !matches!(modal, Modal::Places(_) | Modal::RowMenu { .. }) {
-            ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("dim")))
-                .rect_filled(ctx.screen_rect(), 0.0, Color32::from_black_alpha(110));
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("dim")))
+                .rect_filled(ctx.content_rect(), 0.0, Color32::from_black_alpha(110));
         }
 
         let mut close = false;
@@ -157,7 +157,7 @@ impl App {
                 let (enter, esc) = enter_esc(ctx);
                 input_ok = enter;
                 close = esc;
-                let id = egui::Id::new("modal_input");
+                let id = egui::Id::unique("modal_input");
                 if *first {
                     // Focus and pre-select before drawing, so keys typed straight
                     // after opening the dialog land in it.
@@ -281,7 +281,7 @@ impl App {
             Modal::BatchRename { items, others, rules, first, .. } => {
                 let (enter, esc) = enter_esc(ctx);
                 close = esc;
-                let name_id = egui::Id::new("batch_name");
+                let name_id = egui::Id::unique("batch_name");
                 if std::mem::take(first) || ctx.memory(|m| m.focused().is_none()) {
                     // Windows spend their first frame measuring themselves; keep asking.
                     ctx.memory_mut(|m| m.request_focus(name_id));
@@ -289,7 +289,7 @@ impl App {
                 let th = theme::c();
                 let title = format!("Batch rename {}", crate::app::plural(items.len(), "item"));
                 dialog(&title).show(ctx, |ui| {
-                    ui.set_width((ctx.screen_rect().width() - 60.0).clamp(400.0, 900.0));
+                    ui.set_width((ctx.content_rect().width() - 60.0).clamp(400.0, 900.0));
                     egui::Grid::new("batch").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
                         ui.label("Name");
                         ui.add(egui::TextEdit::singleline(&mut rules.name_mask).id(name_id).desired_width(300.0));
@@ -387,7 +387,7 @@ impl App {
                 let (enter, esc) = enter_esc(ctx);
                 close = esc;
                 pack_ok = enter;
-                let id = egui::Id::new("pack_path");
+                let id = egui::Id::unique("pack_path");
                 if std::mem::take(first) || ctx.memory(|m| m.focused().is_none()) {
                     // Windows spend their first frame measuring themselves; keep asking.
                     ctx.memory_mut(|m| m.request_focus(id));
@@ -447,7 +447,7 @@ impl App {
                 let (enter, esc) = enter_esc(ctx);
                 close = esc;
                 unpack_ok = enter;
-                let id = egui::Id::new("unpack_dest");
+                let id = egui::Id::unique("unpack_dest");
                 if std::mem::take(first) || ctx.memory(|m| m.focused().is_none()) {
                     // Windows spend their first frame measuring themselves; keep asking.
                     ctx.memory_mut(|m| m.request_focus(id));
@@ -922,7 +922,7 @@ impl ConflictDialog {
             ui.set_width(520.0);
             ui.label(format!("“{}” already exists. Put the new one there as:", self.q.target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
             ui.add_space(6.0);
-            let r = ui.add(egui::TextEdit::singleline(text).id(egui::Id::new("conflict_rename")).desired_width(f32::INFINITY));
+            let r = ui.add(egui::TextEdit::singleline(text).id(egui::Id::unique("conflict_rename")).desired_width(f32::INFINITY));
             if !r.has_focus() {
                 r.request_focus();
             }
@@ -1036,15 +1036,15 @@ fn palette_ui(ctx: &egui::Context, st: &mut PaletteState) -> (bool, Option<Palet
         .order(egui::Order::Foreground)
         .fade_in(false)
         .anchor(Align2::CENTER_TOP, vec2(0.0, 40.0))
-        .frame(egui::Frame::window(&ctx.style()).fill(theme::c().header).inner_margin(8.0))
+        .frame(egui::Frame::window(&ctx.global_style()).fill(theme::c().header).inner_margin(8.0))
         .show(ctx, |ui| {
             ui.set_width(640.0);
             if st.first {
                 // Focus before drawing so keys typed straight away land in the search box.
-                ui.ctx().memory_mut(|m| m.request_focus(egui::Id::new("palette_text")));
+                ui.ctx().memory_mut(|m| m.request_focus(egui::Id::unique("palette_text")));
             }
             let mut out = egui::TextEdit::singleline(&mut st.query)
-                .id(egui::Id::new("palette_text"))
+                .id(egui::Id::unique("palette_text"))
                 .hint_text(hint)
                 .desired_width(f32::INFINITY)
                 .font(egui::TextStyle::Heading)
@@ -1107,7 +1107,7 @@ fn palette_ui(ctx: &egui::Context, st: &mut PaletteState) -> (bool, Option<Palet
 }
 
 fn text_width(ui: &egui::Ui, s: &str, font: &FontId) -> f32 {
-    ui.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x)
+    ui.ctx().fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x)
 }
 
 /// Shortens text to fit `max_w` by cutting its start ("…/photos/2024"); empty if nothing fits.
@@ -1181,7 +1181,7 @@ fn row_menu_ui(ctx: &egui::Context, at: egui::Pos2, selected: &mut usize, items:
     }
     let th = theme::c();
     let mut chosen = None;
-    let r = egui::Area::new(egui::Id::new("row_menu")).order(egui::Order::Foreground).fixed_pos(at).constrain(true).show(ctx, |ui| {
+    let r = egui::Area::new(egui::Id::unique("row_menu")).order(egui::Order::Foreground).fixed_pos(at).constrain(true).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.set_width(340.0);
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -1219,7 +1219,7 @@ fn about_ui(ctx: &egui::Context, update: Option<&crate::update::Release>) -> boo
     let th = theme::c();
     let mut close = false;
     egui::Window::new("About Duopane")
-        .id(egui::Id::new("modal_dialog"))
+        .id(egui::Id::unique("modal_dialog"))
         .collapsible(false)
         .resizable(false)
         .title_bar(false)
@@ -1331,11 +1331,11 @@ mod tests {
         let mut answer = None;
         let mut frame = |events: Vec<egui::Event>| {
             let input = egui::RawInput { events, ..Default::default() };
-            let _ = ctx.run(input, |ctx| {
+            ctx.run_pass(input, |ctx| {
                 if let Some(r) = d.ui(ctx) {
                     answer = Some(r);
                 }
-            });
+            }).drop_without_applying_deltas();
         };
         frame(vec![]);
         for &key in keys {
@@ -1352,7 +1352,7 @@ mod tests {
         let run = |events: Vec<egui::Event>, selected: &mut usize| {
             let mut out = (false, None);
             let input = egui::RawInput { events, ..Default::default() };
-            let _ = ctx.run(input, |ctx| out = row_menu_ui(ctx, egui::pos2(10.0, 10.0), selected, &items));
+            ctx.run_pass(input, |ctx| out = row_menu_ui(ctx, egui::pos2(10.0, 10.0), selected, &items)).drop_without_applying_deltas();
             out
         };
         let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
@@ -1372,8 +1372,8 @@ mod tests {
     #[test]
     fn long_paths_lose_their_start() {
         let ctx = egui::Context::default();
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.run_ui(Default::default(), |root| {
+            egui::CentralPanel::default().show(root, |ui| {
                 let font = FontId::proportional(14.0);
                 let path = "~/.cache/duopane/mounts/per@host/.cache/com.bitwarden.desktop";
                 assert_eq!(fit_end(ui, path, 10_000.0, &font), path);
@@ -1382,7 +1382,7 @@ mod tests {
                 assert!(text_width(ui, &short, &font) <= 250.0);
                 assert_eq!(fit_end(ui, path, 1.0, &font), "");
             });
-        });
+        }).drop_without_applying_deltas();
     }
 
     #[test]
@@ -1393,7 +1393,7 @@ mod tests {
         // It draws, and stays open until closed.
         let ctx = egui::Context::default();
         let mut closed = true;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| closed = about_ui(ctx, None));
+        ctx.run_pass(egui::RawInput::default(), |ctx| closed = about_ui(ctx, None)).drop_without_applying_deltas();
         assert!(!closed);
     }
 

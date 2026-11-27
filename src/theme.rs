@@ -182,7 +182,7 @@ pub fn apply(ctx: &egui::Context, s: &Settings) {
     apply_fonts(ctx, (&s.ui_font, s.ui_font_weight), (&s.mono_font, s.mono_font_weight));
 
     let size = s.font_size;
-    ctx.style_mut(|st| {
+    ctx.global_style_mut(|st| {
         st.text_styles.insert(TextStyle::Body, FontId::new(size, FontFamily::Proportional));
         st.text_styles.insert(TextStyle::Button, FontId::new(size, FontFamily::Proportional));
         st.text_styles.insert(TextStyle::Monospace, FontId::new(size, FontFamily::Monospace));
@@ -370,10 +370,10 @@ mod tests {
         }
         let ctx = egui::Context::default();
         apply_fonts(&ctx, ("", 400), ("", 400));
-        let _ = ctx.run(Default::default(), |_| {});
+        ctx.run_pass(Default::default(), |_| {}).drop_without_applying_deltas();
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             let id = FontId::new(14.0, family);
-            assert!(ctx.fonts(|f| f.has_glyphs(&id, "日本語のファイル 한글")));
+            assert!(ctx.fonts_mut(|f| f.has_glyphs(&id, "日本語のファイル 한글")));
         }
     }
 }

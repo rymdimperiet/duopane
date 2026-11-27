@@ -1435,7 +1435,7 @@ impl App {
     }
 
     /// The stack's frame under the panes.
-    pub(crate) fn stack_ui(&mut self, ctx: &egui::Context) {
+    pub(crate) fn stack_ui(&mut self, root: &mut egui::Ui) {
         // Things from the stack go to the active pane, when it's a plain folder.
         let pane = &self.panes[self.active];
         let side = match (self.settings.stacked_panes, self.active) {
@@ -1445,7 +1445,7 @@ impl App {
             (true, _) => "bottom pane",
         };
         let dest = (pane.archive.is_none() && pane.results.is_none()).then(|| crate::stack::Dest { path: pane.path.clone(), side });
-        let (changed, action) = self.stack_view.ui(ctx, &mut self.settings.stack, self.settings.font_size, dest);
+        let (changed, action) = self.stack_view.ui(root, &mut self.settings.stack, self.settings.font_size, dest);
         if changed {
             self.dirty = true;
         }

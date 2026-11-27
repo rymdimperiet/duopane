@@ -190,7 +190,7 @@ impl QuickView {
         };
         if let Some(tex) = &self.picture {
             let size = tex.size_vec2();
-            let max = vec2(ui.available_width(), (ui.ctx().screen_rect().height() * 0.4).max(160.0));
+            let max = vec2(ui.available_width(), (ui.ctx().content_rect().height() * 0.4).max(160.0));
             let scale = (max.x / size.x).min(max.y / size.y).min(1.0);
             ui.add(egui::Image::new((tex.id(), size * scale)).tint(if stale { Color32::from_gray(140) } else { Color32::WHITE }));
             ui.add_space(10.0);

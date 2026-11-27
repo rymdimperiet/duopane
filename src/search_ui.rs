@@ -164,7 +164,7 @@ impl SearchDialog {
 
         crate::dialogs::dialog("Find files").show(ctx, |ui| {
             ui.set_width(760.0);
-            let id = egui::Id::new("search_text");
+            let id = egui::Id::unique("search_text");
             if self.first {
                 // Select the last search, so typing replaces it.
                 let mut st = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
@@ -396,7 +396,7 @@ mod tests {
         let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
         let frame = |d: &mut SearchDialog, events: Vec<egui::Event>| {
             let mut out = None;
-            let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| out = d.ui(ctx));
+            ctx.run_pass(egui::RawInput { events, ..Default::default() }, |ctx| out = d.ui(ctx)).drop_without_applying_deltas();
             out
         };
         let open = || {

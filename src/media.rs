@@ -5,7 +5,8 @@
 //! raw RGBA pictures and the sound as raw samples. `ffprobe` supplies length and tags.
 
 use crate::lister_load::have;
-use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player as Sink, Source};
+use std::num::NonZero;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -101,23 +102,23 @@ struct PipeSource {
 }
 
 impl Iterator for PipeSource {
-    type Item = i16;
-    fn next(&mut self) -> Option<i16> {
+    type Item = rodio::Sample;
+    fn next(&mut self) -> Option<rodio::Sample> {
         let mut b = [0u8; 2];
         self.r.read_exact(&mut b).ok()?;
-        Some(i16::from_le_bytes(b))
+        Some(rodio::Sample::from(i16::from_le_bytes(b)) / 32768.0)
     }
 }
 
 impl Source for PipeSource {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        2
+    fn channels(&self) -> rodio::ChannelCount {
+        NonZero::new(2).unwrap()
     }
-    fn sample_rate(&self) -> u32 {
-        44100
+    fn sample_rate(&self) -> rodio::SampleRate {
+        NonZero::new(44100).unwrap()
     }
     fn total_duration(&self) -> Option<Duration> {
         None
@@ -128,7 +129,7 @@ pub struct Player {
     path: PathBuf,
     pub info: MediaInfo,
     pub video: bool,
-    out: Option<(OutputStream, OutputStreamHandle)>,
+    out: Option<MixerDeviceSink>,
     sink: Option<Sink>,
     /// Music decoded in-process (seekable without restarting).
     native: bool,
@@ -146,7 +147,11 @@ impl Player {
     pub fn new(path: &Path, video: bool, volume: f32) -> Player {
         let ffmpeg = have("ffmpeg");
         let mut info = probe(path).unwrap_or_default();
-        let out = OutputStream::try_default().ok();
+        let out = DeviceSinkBuilder::open_default_sink().ok().map(|mut s| {
+            // It would otherwise say so on the terminal each time the lister closes.
+            s.log_on_drop(false);
+            s
+        });
         let mut error = None;
         if out.is_none() {
             error = Some("No sound output found; playing without sound.".to_string());
@@ -252,11 +257,12 @@ impl Player {
     fn start_at(&mut self, t: f64) {
         self.stop();
         self.offset = t;
-        let handle = self.out.as_ref().map(|(_, h)| h.clone());
-        if let Some(h) = &handle {
+        if let Some(out) = &self.out {
+            let h = out.mixer();
             if self.native {
                 if let Ok(f) = File::open(&self.path) {
-                    if let (Ok(dec), Ok(sink)) = (rodio::Decoder::new(BufReader::new(f)), Sink::try_new(h)) {
+                    if let Ok(dec) = rodio::Decoder::new(BufReader::new(f)) {
+                        let sink = Sink::connect_new(h);
                         sink.set_volume(self.volume);
                         sink.append(dec);
                         if t > 0.0 {
@@ -275,7 +281,8 @@ impl Player {
                     .stderr(Stdio::null())
                     .spawn();
                 if let Ok(mut c) = child {
-                    if let (Some(out), Ok(sink)) = (c.stdout.take(), Sink::try_new(h)) {
+                    if let Some(out) = c.stdout.take() {
+                        let sink = Sink::connect_new(h);
                         sink.set_volume(self.volume);
                         sink.append(PipeSource { r: BufReader::with_capacity(1 << 16, out) });
                         self.sink = Some(sink);
@@ -422,5 +429,49 @@ pub fn fmt_time(t: f64) -> String {
         format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
     } else {
         format!("{}:{:02}", t / 60, t % 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Half a second of a quiet tone as a WAV file.
+    fn wav(path: &Path) {
+        let rate = 8000u32;
+        let samples: Vec<i16> = (0..rate / 2).map(|i| ((i as f32 * 0.3).sin() * 8000.0) as i16).collect();
+        let data = (samples.len() * 2) as u32;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&(rate * 2).to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data.to_le_bytes());
+        for s in samples {
+            b.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(path, b).unwrap();
+    }
+
+    /// Music is decoded in-process: its length is known, and the samples come
+    /// out as the -1..1 floats the sound output wants.
+    #[test]
+    fn music_decodes() {
+        let path = std::env::temp_dir().join(format!("duopane-media-{}.wav", std::process::id()));
+        wav(&path);
+        let dec = rodio::Decoder::new(BufReader::new(File::open(&path).unwrap())).unwrap();
+        let secs = dec.total_duration().unwrap().as_secs_f64();
+        assert!((secs - 0.5).abs() < 0.01, "{secs}");
+        let all: Vec<rodio::Sample> = dec.collect();
+        assert_eq!(all.len(), 4000);
+        assert!(all.iter().all(|s| (-1.0..=1.0).contains(s)) && all.iter().any(|s| s.abs() > 0.1));
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -288,7 +288,7 @@ fn unpack_zip(archive: &Path, dest: &Path, ctx: &mut Ctx) -> io::Result<()> {
         };
         // enclosed_name refuses names like "../../etc/passwd".
         let Some(rel) = f.enclosed_name() else {
-            ctx.error(archive, format!("skipped unsafe name {}", f.name()));
+            ctx.error(archive, format!("skipped unsafe name {}", String::from_utf8_lossy(f.name_raw())));
             continue;
         };
         let out = dest.join(&rel);
@@ -482,7 +482,8 @@ pub fn build_index(archive: &Path) -> Result<Index, String> {
         let mut z = zip::ZipArchive::new(BufReader::new(File::open(archive).map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
         for i in 0..z.len() {
             let f = z.by_index_raw(i).map_err(|e| e.to_string())?;
-            let Some(path) = clean_name(f.name()) else { continue };
+            // A name that can't be read as text is left out, like an unsafe one.
+            let Some(path) = f.name().ok().and_then(|n| clean_name(&n)) else { continue };
             raw.push(IndexEntry { path, is_dir: f.is_dir(), size: f.size(), modified: f.last_modified().and_then(zip_to_system) });
         }
     } else {
@@ -543,7 +544,7 @@ pub fn extract(archive: &Path, items: &[String], base: &str, dest: &Path, ctx: &
                     break;
                 }
                 let mut f = z.by_index(i).map_err(io::Error::other)?;
-                let Some(name) = clean_name(f.name()) else { continue };
+                let Some(name) = f.name().ok().and_then(|n| clean_name(&n)) else { continue };
                 if !wanted(&name) {
                     continue;
                 }
@@ -654,7 +655,7 @@ pub fn extract_one(archive: &Path, inner: &str, out: &Path) -> Result<(), String
         let mut z = zip::ZipArchive::new(BufReader::new(File::open(archive).map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
         for i in 0..z.len() {
             let mut f = z.by_index(i).map_err(|e| e.to_string())?;
-            if clean_name(f.name()).as_deref() == Some(inner) && !f.is_dir() {
+            if f.name().ok().and_then(|n| clean_name(&n)).as_deref() == Some(inner) && !f.is_dir() {
                 // A new file: never write through something already there.
                 let mut w = fs::OpenOptions::new().write(true).create_new(true).open(out).map_err(|e| e.to_string())?;
                 io::copy(&mut f, &mut w).map_err(|e| e.to_string())?;
@@ -698,11 +699,11 @@ pub fn listing(archive: &Path) -> Result<String, String> {
                 .map(|t| format!("{:04}-{:02}-{:02} {:02}:{:02}", t.year(), t.month(), t.day(), t.hour(), t.minute()))
                 .unwrap_or_default();
             if f.is_dir() {
-                line(&mut out, None, when, f.name());
+                line(&mut out, None, when, &f.name().unwrap_or_else(|_| String::from_utf8_lossy(f.name_raw())));
             } else {
                 files += 1;
                 bytes += f.size();
-                line(&mut out, Some(f.size()), when, f.name());
+                line(&mut out, Some(f.size()), when, &f.name().unwrap_or_else(|_| String::from_utf8_lossy(f.name_raw())));
             }
         }
     } else {

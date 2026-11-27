@@ -756,10 +756,11 @@ impl App {
         }
     }
 
-    fn lister_frame(&mut self, ctx: &egui::Context) {
+    fn lister_frame(&mut self, root: &mut egui::Ui) {
+        let ctx = &root.ctx().clone();
         let Some(l) = self.lister.as_mut() else { return };
         let mut volume = self.settings.volume;
-        let action = l.ui(ctx, &mut volume);
+        let action = l.ui(root, &mut volume);
         let wrap = l.wrap;
         if volume != self.settings.volume || wrap != self.settings.lister_wrap {
             self.settings.volume = volume;
@@ -825,7 +826,7 @@ impl App {
     /// Only some systems deliver these; see the README.
     fn files_dropped_in(&mut self, ctx: &egui::Context) {
         let (paths, pos) = ctx.input(|i| {
-            (i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>(), i.pointer.hover_pos())
+            (i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect::<Vec<_>>(), i.pointer.hover_pos())
         });
         if paths.is_empty() || self.modal.is_some() {
             return;
@@ -880,20 +881,28 @@ impl eframe::App for App {
         }
         #[cfg(target_os = "linux")]
         if let Some(nd) = &self.native_drag {
-            nd.set_move(raw.modifiers.shift);
+            // Raw input no longer carries the held keys: last frame's, plus any change since.
+            let mut mods = ctx.input(|i| i.modifiers);
+            for e in &raw.events {
+                if let Event::ModifiersChanged(m) = e {
+                    mods = *m;
+                }
+            }
+            nd.set_move(mods.shift);
             let events = nd.events();
-            drag_events_to_input(events, raw, ctx.zoom_factor(), &mut self.native_dragging, &mut self.foreign_hover);
+            drag_events_to_input(events, raw, mods, ctx.zoom_factor(), &mut self.native_dragging, &mut self.foreign_hover);
         }
         #[cfg(not(target_os = "linux"))]
         let _ = (ctx, raw);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &root.ctx().clone();
         // Pictures in the viewer are scaled to what the graphics card can hold.
         crate::lister_load::set_max_texture_side(ctx.input(|i| i.max_texture_side));
         self.poll_background();
         if self.lister.is_some() {
-            self.lister_frame(ctx);
+            self.lister_frame(root);
             self.update_title(ctx);
             self.save_if_dirty();
             return;
@@ -901,9 +910,9 @@ impl eframe::App for App {
         self.handle_keys(ctx);
         self.files_dropped_in(ctx);
         self.follow_quick_view(ctx);
-        self.bottom_bar(ctx);
-        self.stack_ui(ctx);
-        self.panes_ui(ctx);
+        self.bottom_bar(root);
+        self.stack_ui(root);
+        self.panes_ui(root);
         self.modal_ui(ctx);
         self.hand_drag_to_desktop(ctx);
         for a in std::mem::take(&mut self.actions) {
@@ -930,6 +939,19 @@ impl Drop for App {
     }
 }
 
+/// A file dropped in from another app, as egui takes it.
+#[derive(Debug)]
+struct DroppedPath(PathBuf);
+
+impl egui::DroppedFile for DroppedPath {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|e| e.to_string())
+    }
+}
+
 /// Turns the desktop's drag events into egui input (see `App::raw_input_hook`).
 /// `dragging`: one of our drags is in the desktop's hands; `hover`: files from
 /// another app are over the window.
@@ -937,13 +959,13 @@ impl Drop for App {
 pub(crate) fn drag_events_to_input(
     events: Vec<crate::native_drag::DragEvent>,
     raw: &mut egui::RawInput,
+    mods: egui::Modifiers,
     zoom: f32,
     dragging: &mut bool,
     hover: &mut bool,
 ) {
     use crate::native_drag::DragEvent;
     let to_points = |x: f64, y: f64| egui::pos2(x as f32, y as f32) / zoom;
-    let mods = raw.modifiers;
     let release = |pos| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: mods };
     for e in events {
         match e {
@@ -963,7 +985,7 @@ pub(crate) fn drag_events_to_input(
             }
             DragEvent::DropFiles { paths, x, y } => {
                 raw.events.push(Event::PointerMoved(to_points(x, y)));
-                raw.dropped_files.extend(paths.into_iter().map(|p| egui::DroppedFile { path: Some(p), ..Default::default() }));
+                raw.dropped_files.extend(paths.into_iter().map(|p| std::sync::Arc::new(DroppedPath(p)) as egui::DroppedFileHandle));
                 *hover = false;
             }
             // Dropped in another app or cancelled: end egui's side of the drag,

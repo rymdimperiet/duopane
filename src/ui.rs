@@ -15,18 +15,18 @@ pub(crate) struct DragPayload {
 }
 
 impl App {
-    pub(crate) fn bottom_bar(&mut self, ctx: &egui::Context) {
+    pub(crate) fn bottom_bar(&mut self, root: &mut egui::Ui) {
         if self.settings.show_key_bar {
-            self.key_bar(ctx);
+            self.key_bar(root);
         }
-        self.status_bar(ctx);
+        self.status_bar(&root.ctx().clone());
     }
 
     /// The function-key bar at the very bottom (can be hidden in Appearance).
-    fn key_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("keys")
+    fn key_bar(&mut self, root: &mut egui::Ui) {
+        egui::Panel::bottom("keys")
             .frame(egui::Frame::default().fill(theme::c().header).inner_margin(egui::Margin::symmetric(8, 4)))
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 // Holding Alt, Shift or Ctrl shows what the F-keys do with that key,
                 // like Double Commander's function-key bar.
                 let m = ui.input(|i| i.modifiers);
@@ -144,9 +144,9 @@ impl App {
         }
         // A small note floating over the bottom-left of the panes, so nothing in the
         // window moves when a message comes and goes.
-        let area = self.panes_rect.unwrap_or_else(|| ctx.screen_rect());
+        let area = self.panes_rect.unwrap_or_else(|| ctx.content_rect());
         let pos = egui::pos2(area.left() + 16.0, area.bottom() - 34.0);
-        egui::Area::new(egui::Id::new("status_note"))
+        egui::Area::new(egui::Id::unique("status_note"))
             .order(egui::Order::Foreground)
             .pivot(Align2::LEFT_BOTTOM)
             .fixed_pos(pos)
@@ -191,10 +191,11 @@ impl App {
             });
     }
 
-    pub(crate) fn panes_ui(&mut self, ctx: &egui::Context) {
+    pub(crate) fn panes_ui(&mut self, root: &mut egui::Ui) {
+        let ctx = &root.ctx().clone();
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::c().bg).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 2 }))
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 self.panes_rect = Some(ui.max_rect());
                 let active = self.active;
                 // While the stack has the keyboard, the active pane keeps its border
@@ -264,7 +265,7 @@ pub(crate) fn pane_rects(r: egui::Rect, split: f32, stacked: bool) -> (egui::Rec
 /// Ctrl+double-click resets every size (the "reset_layout" command).
 fn pane_divider(ui: &mut egui::Ui, rect: egui::Rect, area: egui::Rect, stacked: bool, split: &mut f32, actions: &mut Vec<Action>) {
     let grab = if stacked { vec2(0.0, 2.0) } else { vec2(2.0, 0.0) };
-    let r = ui.interact(rect.expand2(grab), egui::Id::new("pane_divider"), Sense::click_and_drag());
+    let r = ui.interact(rect.expand2(grab), egui::Id::unique("pane_divider"), Sense::click_and_drag());
     let (length, least_px, start) = if stacked { (area.height(), MIN_PANE_HEIGHT, area.top()) } else { (area.width(), MIN_PANE, area.left()) };
     let room = (length - DIVIDER).max(1.0);
     let least = (least_px / room).min(0.5);
@@ -312,8 +313,8 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, keys: b
         path_bar(ui, pane, idx, active, bookmarked, full_w, actions);
 
         // Columns are as wide as the text they hold, unless dragged wider or narrower.
-        let (fit_size, fit_date) = ui.fonts(|f| {
-            let w = |s: &str| f.layout_no_wrap(s.to_string(), small.clone(), Color32::WHITE).size().x;
+        let (fit_size, fit_date) = ui.ctx().fonts_mut(|f| {
+            let mut w = |s: &str| f.layout_no_wrap(s.to_string(), small.clone(), Color32::WHITE).size().x;
             (w("888.8 MB") + 16.0, w("8888-88-88 88:88").max(w("Modified") + 14.0) + 28.0)
         });
         let date = set.date.unwrap_or(fit_date);
@@ -332,7 +333,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, keys: b
             (cols.1, SortKey::Size, "Size", false),
             (cols.2, SortKey::Modified, "Modified", false),
         ] {
-            let r = ui.interact(rect, egui::Id::new(("head", idx, label)), Sense::click());
+            let r = ui.interact(rect, egui::Id::unique(("head", idx, label)), Sense::click());
             // The Name column also stands for "type" (sorting by type keeps names in view).
             let here = |k: SortKey| k == key || (left && k == SortKey::Extension);
             let sorted = here(pane.sort);
@@ -423,7 +424,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, keys: b
                 row_ui(ui, pane, i, idx, active && keys, &font, &small, &widths, row_h, actions);
             }
         });
-        pane.scroll_offset = out.state.offset.y;
+        pane.scroll_offset = out.state.clamped_offset().y;
         pane.view_height = out.inner_rect.height();
 
         // --- footer ---
@@ -491,7 +492,7 @@ fn drag_label(ctx: &egui::Context) {
     let mv = ctx.input(|i| i.modifiers.shift);
     ctx.set_cursor_icon(if mv { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Copy });
     let what = crate::app::describe(&p.paths);
-    egui::Area::new(egui::Id::new("drag_label"))
+    egui::Area::new(egui::Id::unique("drag_label"))
         .order(egui::Order::Tooltip)
         .fixed_pos(pos + vec2(16.0, 12.0))
         .interactable(false)
@@ -519,7 +520,7 @@ fn path_bar(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookma
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     if let Some(text) = &mut pane.editing_path {
-        let r = bar.add(egui::TextEdit::singleline(text).id(egui::Id::new(("path_edit", idx))).desired_width(f32::INFINITY));
+        let r = bar.add(egui::TextEdit::singleline(text).id(egui::Id::unique(("path_edit", idx))).desired_width(f32::INFINITY));
         let (enter, esc) = bar.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
         if r.lost_focus() || esc {
             if enter && !esc {
@@ -732,7 +733,7 @@ fn row_ui(
         for (id, title) in row_menu(&e.name, e.is_dir, pane.archive.is_some()) {
             if ui.button(title).clicked() {
                 actions.push(Action::RunId(id));
-                ui.close_menu();
+                ui.close();
             }
         }
     });
@@ -740,14 +741,14 @@ fn row_ui(
 
 /// The size of a line of text (a small button is exactly this tall).
 fn width_height(ui: &egui::Ui, text: &str, font: &FontId) -> (f32, f32) {
-    let s = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size());
+    let s = ui.ctx().fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size());
     (s.x, s.y)
 }
 
 /// Shortens a name to fit `max_w`, cutting the start of the name so the end and the
 /// extension stay visible ("holiday-pho…summer.jpg"). Returns (text, was shortened).
 pub(crate) fn fit_name(ui: &egui::Ui, name: &str, suffix: &str, is_dir: bool, max_w: f32, font: &FontId) -> (String, bool) {
-    let width = |s: &str| ui.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x);
+    let width = |s: &str| ui.ctx().fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x);
     let full = format!("{name}{suffix}");
     if max_w <= 0.0 || width(&full) <= max_w {
         return (full, false);
@@ -844,7 +845,7 @@ fn column_handles(ui: &mut egui::Ui, head: egui::Rect, cols: &(egui::Rect, egui:
     let right = head.right() - 6.0;
     for (n, x) in [(0, cols.1.left()), (1, cols.2.left())] {
         let handle = egui::Rect::from_center_size(pos2(x, head.center().y), vec2(8.0, head.height()));
-        let r = ui.interact(handle, egui::Id::new(("column_edge", idx, n)), Sense::click_and_drag());
+        let r = ui.interact(handle, egui::Id::unique(("column_edge", idx, n)), Sense::click_and_drag());
         let strong = r.hovered() || r.dragged();
         let color = if strong { theme::c().text.gamma_multiply(0.6) } else { theme::c().border };
         ui.painter().vline(x, head.y_range().shrink(head.height() * 0.25), Stroke::new(1.0_f32, color));
@@ -934,14 +935,11 @@ mod tests {
     }
 
     fn frame_with(ctx: &egui::Context, panes: &mut [Pane; 2], actions: &mut Vec<Action>, events: Vec<Event>, modifiers: egui::Modifiers) {
-        let input = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))),
-            events,
-            modifiers,
-            ..Default::default()
-        };
-        let _ = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        // The held keys come as an event now, ahead of the rest.
+        let events = std::iter::once(Event::ModifiersChanged(modifiers)).chain(events).collect();
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))), events, ..Default::default() };
+        ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| {
                 let (l, r) = panes.split_at_mut(1);
                 let mut widths = ColumnWidths::default();
                 ui.columns(2, |cols| {
@@ -950,7 +948,7 @@ mod tests {
                 });
             });
             drag_label(ctx);
-        });
+        }).drop_without_applying_deltas();
     }
 
     /// Presses at `from`, moves in steps to `to`, releases there (Shift held when `shift`).
@@ -1029,7 +1027,7 @@ mod tests {
         frame(&ctx, &mut panes, &mut actions, vec![]);
 
         // Rows: "sub" then "b.txt", below the path bar and the column headers.
-        let row_h = theme::row_height(ctx.style().text_styles[&egui::TextStyle::Body].size);
+        let row_h = theme::row_height(ctx.global_style().text_styles[&egui::TextStyle::Body].size);
         let row = |i: usize| pos2(150.0, 8.0 + 30.0 + row_h + (i as f32 + 0.5) * row_h);
         // Make sure the rows are where this test thinks: clicking row 1 puts the cursor there.
         let click = |pressed| Event::PointerButton { pos: row(1), button: PointerButton::Primary, pressed, modifiers: Default::default() };
@@ -1076,13 +1074,13 @@ mod tests {
         let ctx = egui::Context::default();
         let mut actions = Vec::new();
         frame(&ctx, &mut panes, &mut actions, vec![]);
-        let row_h = theme::row_height(ctx.style().text_styles[&egui::TextStyle::Body].size);
+        let row_h = theme::row_height(ctx.global_style().text_styles[&egui::TextStyle::Body].size);
         let row0 = pos2(150.0, 8.0 + 30.0 + row_h * 1.5);
         let press = |pressed| Event::PointerButton { pos: row0, button: PointerButton::Primary, pressed, modifiers: Default::default() };
         // The desktop's events, as egui input for one frame.
         let desktop = |ctx: &egui::Context, panes: &mut [Pane; 2], actions: &mut Vec<Action>, events: Vec<DragEvent>, dragging: &mut bool| {
             let mut raw = RawInput::default();
-            crate::app::drag_events_to_input(events, &mut raw, 1.0, dragging, &mut false);
+            crate::app::drag_events_to_input(events, &mut raw, egui::Modifiers::NONE, 1.0, dragging, &mut false);
             frame(ctx, panes, actions, raw.events);
         };
 
@@ -1126,9 +1124,9 @@ mod tests {
         let steps = [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(from.lerp(to, 0.5))], vec![Event::PointerMoved(to)], vec![button(to, false)]];
         for events in steps {
             let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))), events, ..Default::default() };
-            let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| draw(ui));
-            });
+            ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| draw(ui));
+            }).drop_without_applying_deltas();
         }
     }
 
@@ -1195,10 +1193,11 @@ mod tests {
         let ctrl = egui::Modifiers::CTRL;
         let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: ctrl };
         for (n, events) in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], vec![button(true)], vec![button(false)]].into_iter().enumerate() {
-            let input = RawInput { screen_rect: Some(area), events, modifiers: ctrl, time: Some(n as f64 * 0.05), ..Default::default() };
-            let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| pane_divider(ui, pane_rects(area, split, false).1, area, false, &mut split, &mut actions));
-            });
+            let events = std::iter::once(Event::ModifiersChanged(ctrl)).chain(events).collect();
+            let input = RawInput { screen_rect: Some(area), events, time: Some(n as f64 * 0.05), ..Default::default() };
+            ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| pane_divider(ui, pane_rects(area, split, false).1, area, false, &mut split, &mut actions));
+            }).drop_without_applying_deltas();
         }
         assert_eq!(split, 0.5);
         assert!(matches!(actions[..], [Action::RunId("reset_layout")]));
