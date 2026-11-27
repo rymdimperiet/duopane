@@ -137,7 +137,7 @@ impl App {
     /// Messages, progress of file operations and the name search.
     fn status_bar(&mut self, ctx: &egui::Context) {
         // Only take up room when there's something to say.
-        let searching = !self.quick.is_empty() && self.quick_at.elapsed() < Duration::from_millis(1200);
+        let searching = !self.quick.is_empty() && self.quick_at.elapsed() < Duration::from_millis(crate::app::QUICK_SEARCH_MS);
         let message = self.status.as_ref().is_some_and(|s| s.at.elapsed() < Duration::from_secs(if s.error { 8 } else { 5 }));
         if self.job.is_none() && !searching && !message {
             return;
@@ -179,7 +179,7 @@ impl App {
                         if !self.queue.is_empty() {
                             ui.label(egui::RichText::new(format!("+{} queued", self.queue.len())).color(theme::c().dim));
                         }
-                    } else if !self.quick.is_empty() && self.quick_at.elapsed() < Duration::from_millis(1200) {
+                    } else if !self.quick.is_empty() && self.quick_at.elapsed() < Duration::from_millis(crate::app::QUICK_SEARCH_MS) {
                         ui.label(egui::RichText::new(format!("Find: {}", self.quick)).color(theme::c().accent));
                     } else if let Some(s) = &self.status {
                         if s.at.elapsed() < Duration::from_secs(if s.error { 8 } else { 5 }) {
@@ -197,6 +197,9 @@ impl App {
             .show(ctx, |ui| {
                 self.panes_rect = Some(ui.max_rect());
                 let active = self.active;
+                // While the stack has the keyboard, the active pane keeps its border
+                // (that's where things from the stack go) but its cursor dims.
+                let keys = !self.stack_view.focused;
                 let b0 = self.settings.bookmarks.contains(&self.panes[0].path);
                 let b1 = self.settings.bookmarks.contains(&self.panes[1].path);
                 let (left, right) = self.panes.split_at_mut(1);
@@ -209,7 +212,7 @@ impl App {
                     let col = &mut ui.new_child(egui::UiBuilder::new().max_rect([rects.0, rects.2][idx]));
                     match quick_view {
                         Some(qv) if qv.slot == idx => qv.ui(col),
-                        _ => pane_ui(col, pane, idx, active == idx, bookmarked, &mut self.settings.columns, actions),
+                        _ => pane_ui(col, pane, idx, active == idx, keys, bookmarked, &mut self.settings.columns, actions),
                     }
                 }
                 pane_divider(ui, rects.1, ui.max_rect(), stacked, &mut self.settings.pane_split, actions);
@@ -291,7 +294,10 @@ fn pane_divider(ui: &mut egui::Ui, rect: egui::Rect, area: egui::Rect, stacked: 
 }
 
 /// Draws one pane: path bar, column headers, the list and a summary line.
-fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmarked: bool, set: &mut ColumnWidths, actions: &mut Vec<Action>) {
+/// `keys`: the keyboard is in the panes (not in the stack), so the active one's
+/// cursor shows bright.
+#[allow(clippy::too_many_arguments)]
+fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, keys: bool, bookmarked: bool, set: &mut ColumnWidths, actions: &mut Vec<Action>) {
     let frame = egui::Frame::default()
         .fill(theme::c().pane)
         .stroke(Stroke::new(1.0_f32, if active { theme::c().accent } else { theme::c().border }))
@@ -414,7 +420,7 @@ fn pane_ui(ui: &mut egui::Ui, pane: &mut Pane, idx: usize, active: bool, bookmar
             }
             pane.cursor_rect = None;
             for i in range {
-                row_ui(ui, pane, i, idx, active, &font, &small, &widths, row_h, actions);
+                row_ui(ui, pane, i, idx, active && keys, &font, &small, &widths, row_h, actions);
             }
         });
         pane.scroll_offset = out.state.offset.y;
@@ -939,8 +945,8 @@ mod tests {
                 let (l, r) = panes.split_at_mut(1);
                 let mut widths = ColumnWidths::default();
                 ui.columns(2, |cols| {
-                    pane_ui(&mut cols[0], &mut l[0], 0, true, false, &mut widths, actions);
-                    pane_ui(&mut cols[1], &mut r[0], 1, false, false, &mut widths, actions);
+                    pane_ui(&mut cols[0], &mut l[0], 0, true, true, false, &mut widths, actions);
+                    pane_ui(&mut cols[1], &mut r[0], 1, false, true, false, &mut widths, actions);
                 });
             });
             drag_label(ctx);

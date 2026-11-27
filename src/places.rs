@@ -280,7 +280,7 @@ fn parse_lsblk(json: &str) -> Devices {
 /// Free and total bytes of the filesystem holding `p`. Can block (dead network mounts).
 #[cfg(unix)]
 #[allow(clippy::useless_conversion)]
-fn space(p: &Path) -> Option<(u64, u64)> {
+pub(crate) fn space(p: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -294,7 +294,7 @@ fn space(p: &Path) -> Option<(u64, u64)> {
 }
 
 #[cfg(not(unix))]
-fn space(_: &Path) -> Option<(u64, u64)> {
+pub(crate) fn space(_: &Path) -> Option<(u64, u64)> {
     None
 }
 

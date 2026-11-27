@@ -13,14 +13,60 @@ use std::process::Command as Process;
 use std::sync::mpsc;
 
 impl App {
+    /// The keyboard is in the stack's frame, so commands work on its items.
+    pub(crate) fn on_stack(&self) -> bool {
+        self.stack_view.focused && !self.settings.stack.is_empty()
+    }
+
+    /// The item under the cursor: the stack's while it has the keyboard,
+    /// otherwise the active pane's.
+    pub(crate) fn cursor_item(&self) -> Option<crate::pane::Entry> {
+        if !self.on_stack() {
+            return self.panes[self.active].cursor_entry().cloned();
+        }
+        let p = self.settings.stack.get(self.stack_view.cursor)?.clone();
+        match self.stack_view.known(&p) {
+            Some(found) => found,
+            // Not looked at yet: ask now, but never wait long (a network folder).
+            None => crate::pane::within(std::time::Duration::from_millis(300), move || crate::stack::entry_of(&p)).flatten(),
+        }
+    }
+
+    /// The picked items (or the one under the cursor), from the stack or the pane.
+    pub(crate) fn picked(&self) -> Vec<PathBuf> {
+        if self.on_stack() {
+            self.stack_view.targets(&self.settings.stack)
+        } else {
+            self.panes[self.active].targets()
+        }
+    }
+
+    /// Where a command's result goes (a copy, an archive): the other pane, or,
+    /// from the stack, the active pane (the one with the border).
+    pub(crate) fn dest_pane(&self) -> usize {
+        if self.on_stack() { self.active } else { self.other() }
+    }
+
+    /// Opening a folder from the stack shows it in the active pane, and the
+    /// keyboard goes along.
+    fn open_folder(&mut self, path: &Path) {
+        self.stack_view.focused = false;
+        self.navigate(self.active, path);
+    }
+
     pub fn open_cursor(&mut self, _ctx: &egui::Context) {
-        let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
-        let in_archive = self.panes[self.active].archive.is_some();
+        self.open_item();
+    }
+
+    /// Enter: a folder or archive opens in the pane, a file in its app.
+    pub(crate) fn open_item(&mut self) {
+        let Some(e) = self.cursor_item() else { return };
+        let in_archive = self.in_archive();
         if e.is_dir {
-            self.navigate(self.active, &e.path);
+            self.open_folder(&e.path);
         } else if !in_archive && crate::archive::is_archive(&e.path) {
             // Like Double Commander: step into the archive as if it were a folder.
-            self.navigate(self.active, &e.path);
+            self.open_folder(&e.path);
             if self.panes[self.active].archive.is_some() {
             }
         } else {
@@ -30,9 +76,9 @@ impl App {
 
     /// Open with the system's app, even archives (in the Shift+Enter menu).
     pub fn open_external(&mut self) {
-        let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
+        let Some(e) = self.cursor_item() else { return };
         if e.is_dir {
-            return self.navigate(self.active, &e.path);
+            return self.open_folder(&e.path);
         }
         self.open_external_entry(&e);
     }
@@ -56,14 +102,38 @@ impl App {
 
     /// The right-click menu, opened from the keyboard just below the cursor row.
     pub fn open_row_menu(&mut self) {
-        let pane = &self.panes[self.active];
-        let Some(e) = pane.cursor_entry().filter(|e| !e.is_up()) else { return };
-        let menu = crate::ui::row_menu(&e.name, e.is_dir, pane.archive.is_some());
-        let at = match (pane.cursor_rect, self.panes_rect) {
+        let at = if self.on_stack() { self.stack_view.cursor_rect } else { self.panes[self.active].cursor_rect };
+        let at = match (at, self.panes_rect) {
             (Some(r), _) => r.left_bottom() + egui::vec2(24.0, 2.0),
             (None, Some(r)) => r.center(),
             (None, None) => egui::pos2(100.0, 100.0),
         };
+        self.open_row_menu_at(at);
+    }
+
+    /// The menu for the item under the cursor, at `at` (right-click, or below the row).
+    pub(crate) fn open_row_menu_at(&mut self, at: egui::Pos2) {
+        let Some(e) = self.cursor_item().filter(|e| !e.is_up()) else {
+            if self.on_stack() {
+                self.set_status("It isn't there any more; Delete takes it off the stack", true);
+            }
+            return;
+        };
+        let mut menu = crate::ui::row_menu(&e.name, e.is_dir, self.in_archive());
+        if self.on_stack() {
+            // From the stack, copies go to the pane with the border, and nothing is pasted here.
+            menu.retain(|(id, _)| *id != "clip_paste");
+            for (id, title) in &mut menu {
+                match *id {
+                    "copy" => *title = "Copy to the pane…".into(),
+                    "move" => *title = "Move to the pane…".into(),
+                    "copy_in_place" => *title = "Copy next to it as…".into(),
+                    _ => {}
+                }
+            }
+            menu.insert(1, ("stack_reveal", "Show it in the pane".into()));
+            menu.insert(2, ("stack", "Take off the stack".into()));
+        }
         let items = menu
             .into_iter()
             .map(|(id, title)| {
@@ -78,11 +148,13 @@ impl App {
     /// the default first, then every other app.
     pub fn open_with(&mut self) {
         let pane = &self.panes[self.active];
-        let picked: Vec<(PathBuf, String, bool)> = pane
-            .targets()
+        let on_stack = self.on_stack();
+        let picked: Vec<(PathBuf, String, bool)> = self
+            .picked()
             .into_iter()
             .map(|p| {
-                let is_dir = pane.entries.iter().find(|e| e.path == p).map_or_else(|| p.is_dir(), |e| e.is_dir);
+                let known = if on_stack { self.stack_view.known(&p).flatten() } else { pane.entries.iter().find(|e| e.path == p).cloned() };
+                let is_dir = known.map_or_else(|| p.is_dir(), |e| e.is_dir);
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 (p, name, is_dir)
             })
@@ -191,8 +263,13 @@ impl App {
     }
 
     /// Commands that would change an archive being browsed say so instead.
+    /// The files the commands work on are inside an archive (never so on the stack).
+    pub(crate) fn in_archive(&self) -> bool {
+        !self.on_stack() && self.panes[self.active].archive.is_some()
+    }
+
     fn refuse_in_archive(&mut self, what: &str) -> bool {
-        if self.panes[self.active].archive.is_some() {
+        if self.in_archive() {
             self.set_status(format!("{what} isn't possible inside an archive (F5 copies files out)"), true);
             return true;
         }
@@ -326,8 +403,9 @@ impl App {
     }
 
     fn refuse_other_in_archive(&mut self) -> bool {
-        if self.panes[self.other()].archive.is_some() {
-            self.set_status("The other pane is inside an archive; files can't be put into an archive that way yet", true);
+        if self.panes[self.dest_pane()].archive.is_some() {
+            let which = if self.on_stack() { "That pane" } else { "The other pane" };
+            self.set_status(format!("{which} is inside an archive; files can't be put into an archive that way yet"), true);
             return true;
         }
         false
@@ -335,9 +413,9 @@ impl App {
 
     /// F3: opens the lister on the file under the cursor.
     pub fn view_file(&mut self) {
-        let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
+        let Some(e) = self.cursor_item() else { return };
         // A folder shows as a tree of everything below it.
-        if e.is_dir && self.panes[self.active].archive.is_some() {
+        if e.is_dir && self.in_archive() {
             return self.set_status("That's a folder inside the archive; Enter opens it", true);
         }
         crate::lister_load::set_tree_hidden(self.settings.show_hidden);
@@ -348,6 +426,25 @@ impl App {
     /// Lister N / P: view the next or previous file in the folder.
     pub(crate) fn lister_step(&mut self, dir: isize) {
         let mode = self.lister.as_ref().map(|l| l.mode).unwrap_or(crate::lister_load::Mode::Auto);
+        let mode = if mode == crate::lister_load::Mode::Hex { mode } else { crate::lister_load::Mode::Auto };
+        if self.on_stack() {
+            // The next (or previous) file on the stack, skipping folders.
+            let stack = &self.settings.stack;
+            let mut i = self.stack_view.cursor as isize;
+            let path = loop {
+                i += dir;
+                if i < 0 || i >= stack.len() as isize {
+                    return;
+                }
+                let p = &stack[i as usize];
+                if self.stack_view.known(p).flatten().is_some_and(|e| !e.is_dir) {
+                    break p.clone();
+                }
+            };
+            self.stack_view.cursor = i as usize;
+            self.lister = Some(crate::lister::Lister::open(&path, mode, self.settings.lister_wrap, self.settings.lister_plugins.clone()));
+            return;
+        }
         let pane = &mut self.panes[self.active];
         let n = pane.entries.len() as isize;
         let mut i = pane.cursor as isize;
@@ -363,7 +460,6 @@ impl App {
         pane.set_cursor(i as usize);
         let virt = pane.entries[i as usize].path.clone();
         let Some(path) = self.materialize(&virt) else { return };
-        let mode = if mode == crate::lister_load::Mode::Hex { mode } else { crate::lister_load::Mode::Auto };
         self.lister = Some(crate::lister::Lister::open(&path, mode, self.settings.lister_wrap, self.settings.lister_plugins.clone()));
     }
 
@@ -372,7 +468,7 @@ impl App {
         if self.refuse_in_archive("Packing") || self.refuse_other_in_archive() {
             return;
         }
-        let sources = self.panes[self.active].targets();
+        let sources = self.picked();
         if sources.is_empty() {
             return self.set_status("Nothing to pack here", true);
         }
@@ -383,11 +479,13 @@ impl App {
             } else {
                 s.file_stem().map(|n| n.to_string_lossy().into_owned())
             }
+        } else if self.on_stack() {
+            Some("stack".to_string())
         } else {
             self.panes[self.active].path.file_name().map(|n| n.to_string_lossy().into_owned())
         }
         .unwrap_or_else(|| "archive".into());
-        let dir = self.panes[self.other()].path.clone();
+        let dir = self.panes[self.dest_pane()].path.clone();
         let format = crate::archive::Format::Zip;
         let path = tilde(&dir.join(format!("{name}.{}", format.ext())));
         self.modal = Some(Modal::Pack { path, format, level: 6, separate: false, delete_after: false, sources, first: true });
@@ -416,11 +514,11 @@ impl App {
         if self.refuse_in_archive("Unpacking a nested archive") || self.refuse_other_in_archive() {
             return;
         }
-        let archives: Vec<PathBuf> = self.panes[self.active].targets().into_iter().filter(|p| crate::archive::is_archive(p)).collect();
+        let archives: Vec<PathBuf> = self.picked().into_iter().filter(|p| crate::archive::is_archive(p)).collect();
         if archives.is_empty() {
             return self.set_status("Select a .zip, .tar, .tar.gz or .tgz file to unpack", true);
         }
-        let dest = tilde(&self.panes[self.other()].path);
+        let dest = tilde(&self.panes[self.dest_pane()].path);
         self.modal = Some(Modal::Unpack { archives, dest, into_folder: true, first: true });
     }
 
@@ -637,7 +735,7 @@ impl App {
     }
 
     pub fn copy_paths(&mut self, ctx: &egui::Context) {
-        let targets = self.panes[self.active].targets();
+        let targets = self.picked();
         if targets.is_empty() {
             return;
         }
@@ -650,10 +748,10 @@ impl App {
     /// On Wayland they go on the system clipboard as files, so they can be pasted
     /// into other apps too; elsewhere their paths go on it as text.
     pub fn clip_files(&mut self, ctx: &egui::Context, cut: bool) {
-        if self.panes[self.active].archive.is_some() {
+        if self.in_archive() {
             return self.set_status("Files inside an archive can't go on the clipboard yet; copy them out first (F5)", true);
         }
-        let paths = self.panes[self.active].targets();
+        let paths = self.picked();
         if paths.is_empty() {
             return;
         }
@@ -707,7 +805,7 @@ impl App {
                 nd.forget_cut();
             }
         }
-        self.prepare_transfer(clip.cut, paths, &dest.to_string_lossy());
+        self.prepare_transfer(clip.cut, paths, &dest.to_string_lossy(), false);
     }
 
     pub fn add_bookmark(&mut self) {
@@ -734,6 +832,11 @@ impl App {
     }
 
     pub fn ask_transfer(&mut self, mv: bool) {
+        if self.on_stack() {
+            // From the stack: to the pane with the border.
+            let paths = self.picked();
+            return self.stack_action(crate::stack::StackAction::Send { to: self.active, mv, paths });
+        }
         let sources = self.panes[self.active].targets();
         if sources.is_empty() {
             return self.set_status("Nothing to copy here", true);
@@ -742,12 +845,12 @@ impl App {
             return;
         }
         let dest = self.panes[self.other()].path.clone();
-        self.ask_transfer_to(mv, sources, &dest, Some(self.active));
+        self.ask_transfer_to(mv, sources, &dest, Some(self.active), false);
     }
 
     /// The Copy / Move dialog for `sources`, with `dest` filled in. `from` is the
     /// pane they come from, if any (files dropped in from another app have none).
-    fn ask_transfer_to(&mut self, mv: bool, sources: Vec<PathBuf>, dest: &Path, from: Option<usize>) {
+    fn ask_transfer_to(&mut self, mv: bool, sources: Vec<PathBuf>, dest: &Path, from: Option<usize>, from_stack: bool) {
         let dest = tilde(dest);
         if let Some((pane, a)) = from.map(|i| &self.panes[i]).and_then(|p| p.archive.as_ref().map(|a| (p, a))) {
             if mv {
@@ -760,7 +863,7 @@ impl App {
             return self.ask(title, "Folder", dest, purpose, None);
         }
         let title = format!("{} {} to:", if mv { "Move" } else { "Copy" }, describe(&sources));
-        self.ask(title, "Folder (or a new name)", dest, InputPurpose::Transfer { mv, sources }, None);
+        self.ask(title, "Folder (or a new name)", dest, InputPurpose::Transfer { mv, sources, from_stack }, None);
     }
 
     /// Files dragged with the mouse and dropped on a pane or a folder in one.
@@ -778,13 +881,13 @@ impl App {
         if let Some(i) = from {
             self.active = i;
         }
-        self.ask_transfer_to(mv, sources, &dest, from);
+        self.ask_transfer_to(mv, sources, &dest, from, false);
     }
 
     /// Hands the selected files to a small drag-source window (ripdrag or
     /// dragon-drop), from which they can be dragged into other apps.
     pub fn drag_out(&mut self) {
-        let targets = self.panes[self.active].targets();
+        let targets = self.picked();
         if targets.is_empty() {
             return self.set_status("Nothing to drag here", true);
         }
@@ -819,10 +922,10 @@ impl App {
         // With several files selected, rename them all at once (not in search
         // results: batch rename works on one folder).
         let pane = &self.panes[self.active];
-        if pane.selected.len() > 1 && pane.results.is_none() {
+        if !self.on_stack() && pane.selected.len() > 1 && pane.results.is_none() {
             return self.ask_batch_rename();
         }
-        let Some(e) = self.panes[self.active].cursor_entry().cloned().filter(|e| !e.is_up()) else { return };
+        let Some(e) = self.cursor_item().filter(|e| !e.is_up()) else { return };
         // The file's own name (in search results, entries are named by their path).
         let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(e.name);
         // Pre-select the name without its extension.
@@ -849,11 +952,11 @@ impl App {
     }
 
     pub fn edit_cursor(&mut self) {
-        let Some(e) = self.panes[self.active].cursor_entry().cloned() else { return };
+        let Some(e) = self.cursor_item() else { return };
         if e.is_dir {
             return self.set_status("That's a folder; press Enter to open it", true);
         }
-        let in_archive = self.panes[self.active].archive.is_some();
+        let in_archive = self.in_archive();
         let Some(path) = self.materialize(&e.path) else { return };
         self.edit_in_editor(&path);
         if in_archive {
@@ -882,7 +985,7 @@ impl App {
         if self.refuse_in_archive("Deleting") {
             return;
         }
-        let paths = self.panes[self.active].targets();
+        let paths = self.picked();
         if paths.is_empty() {
             return;
         }
@@ -899,7 +1002,7 @@ impl App {
         self.modal = Some(Modal::Confirm {
             title: title.into(),
             message,
-            buttons: vec![(button.into(), Some(spec)), ("Cancel".into(), None)],
+            buttons: vec![(button.into(), Some(crate::app::Confirmed::Job(spec))), ("Cancel".into(), None)],
             focus: 0,
         });
     }
@@ -930,11 +1033,11 @@ impl App {
     }
 
     pub fn calculate_size(&mut self) {
-        let targets = self.panes[self.active].targets();
+        let targets = self.picked();
         if targets.is_empty() {
             return;
         }
-        if self.panes[self.active].archive.is_some() {
+        if self.in_archive() {
             let pane = &self.panes[self.active];
             let bytes: u64 = targets.iter().map(|p| pane.archive_size(p)).sum();
             return self.set_status(format!("{}: {} (unpacked)", plural(targets.len(), "item"), crate::pane::human_size(bytes)), false);
@@ -1082,10 +1185,10 @@ impl App {
     pub(crate) fn run_custom(&mut self, i: usize) {
         let Some(c) = self.settings.custom_commands.get(i).cloned() else { return };
         let pane = &self.panes[self.active];
-        let path = pane.cursor_entry().map(|e| e.path.display().to_string()).unwrap_or_default();
+        let path = self.cursor_item().map(|e| e.path.display().to_string()).unwrap_or_default();
         let dir = pane.path.display().to_string();
         let other = self.panes[self.other()].path.display().to_string();
-        let selected: Vec<String> = pane.targets().iter().map(|p| p.display().to_string()).collect();
+        let selected: Vec<String> = self.picked().iter().map(|p| p.display().to_string()).collect();
         let all = selected.iter().map(|s| shell_quote(s)).collect::<Vec<_>>().join(" ");
         let cmd = fill_placeholders(&c.run, &[("{path}", shell_quote(&path)), ("{dir}", shell_quote(&dir)), ("{other}", shell_quote(&other)), ("{selected}", all)]);
         let res = Process::new("sh")
@@ -1146,7 +1249,7 @@ impl App {
                     Err(e) => self.set_status(format!("Couldn't create the file: {e}"), true),
                 }
             }
-            InputPurpose::Transfer { mv, sources } => self.prepare_transfer(mv, sources, &text),
+            InputPurpose::Transfer { mv, sources, from_stack } => self.prepare_transfer(mv, sources, &text, from_stack),
             InputPurpose::Extract { archive, items, base } => {
                 let dest = self.resolve_input_path(&text);
                 if let Err(e) = std::fs::create_dir_all(&dest) {
@@ -1180,6 +1283,9 @@ impl App {
                 for p in &mut self.panes {
                     p.renamed(from, &to); // keeps it in search results under its new name
                 }
+                if crate::stack::renamed(&mut self.settings.stack, from, &to) {
+                    self.dirty = true;
+                }
                 let p = &mut self.panes[self.active];
                 p.reload();
                 let shown = p.results.as_ref().and_then(|r| to.strip_prefix(&r.root).ok()).map(|r| r.to_string_lossy().into_owned());
@@ -1191,7 +1297,7 @@ impl App {
         }
     }
 
-    fn prepare_transfer(&mut self, mv: bool, sources: Vec<PathBuf>, text: &str) {
+    fn prepare_transfer(&mut self, mv: bool, sources: Vec<PathBuf>, text: &str, from_stack: bool) {
         let dest = self.resolve_input_path(text);
         let into = |dest: &Path| -> Vec<(PathBuf, PathBuf)> {
             sources.iter().filter_map(|s| s.file_name().map(|n| (s.clone(), dest.join(n)))).collect()
@@ -1225,6 +1331,9 @@ impl App {
             .collect();
         if items.is_empty() {
             return self.set_status("Nothing to do: it's already there", true);
+        }
+        if from_stack && !mv {
+            self.stack_copying.extend(items.iter().map(|(s, _)| s.clone()));
         }
         // Anything already there is asked about file by file while the job runs.
         self.start_job(JobSpec::Transfer { mv, items, policy: ConflictPolicy::Ask });
@@ -1294,6 +1403,155 @@ fn make_temp_area() -> Result<PathBuf, String> {
 }
 
 impl App {
+    /// Ctrl+G: the selected files (or the one under the cursor) go on the stack,
+    /// or come off it when they're all on it already.
+    pub fn stack_toggle(&mut self) {
+        if self.on_stack() {
+            let paths = self.picked();
+            self.settings.stack.retain(|p| !paths.contains(p));
+            self.dirty = true;
+            return;
+        }
+        if self.refuse_in_archive("Putting files on the stack") {
+            return;
+        }
+        let paths = self.panes[self.active].targets();
+        let (added, removed) = crate::stack::toggle(&mut self.settings.stack, paths);
+        if added + removed > 0 {
+            self.dirty = true;
+        }
+    }
+
+    /// Ctrl+Tab: the keyboard goes to the stack's frame, or back to the panes.
+    pub fn stack_focus(&mut self) {
+        if self.stack_view.focused {
+            self.stack_view.focused = false;
+        } else if self.settings.stack.is_empty() {
+            self.set_status("The stack is empty: Ctrl+G puts the selected files on it", true);
+        } else {
+            self.stack_view.focused = true;
+            self.quick.clear();
+        }
+    }
+
+    /// The stack's frame under the panes.
+    pub(crate) fn stack_ui(&mut self, ctx: &egui::Context) {
+        // Things from the stack go to the active pane, when it's a plain folder.
+        let pane = &self.panes[self.active];
+        let side = match (self.settings.stacked_panes, self.active) {
+            (false, 0) => "left pane",
+            (false, _) => "right pane",
+            (true, 0) => "top pane",
+            (true, _) => "bottom pane",
+        };
+        let dest = (pane.archive.is_none() && pane.results.is_none()).then(|| crate::stack::Dest { path: pane.path.clone(), side });
+        let (changed, action) = self.stack_view.ui(ctx, &mut self.settings.stack, self.settings.font_size, dest);
+        if changed {
+            self.dirty = true;
+        }
+        if let Some(a) = action {
+            self.stack_action(a);
+        }
+    }
+
+    /// What a key or click in the stack's frame asked for.
+    pub(crate) fn stack_action(&mut self, action: crate::stack::StackAction) {
+        use crate::stack::StackAction;
+        match action {
+            StackAction::Used => {}
+            StackAction::Changed => self.dirty = true,
+            StackAction::Leave => self.stack_view.focused = false,
+            StackAction::Clear => self.ask_clear_stack(),
+            StackAction::Focus => self.stack_view.focused = true,
+            StackAction::Open => {
+                self.stack_view.focused = true;
+                self.open_item();
+            }
+            StackAction::Menu(at) => {
+                self.stack_view.focused = true;
+                self.open_row_menu_at(at);
+            }
+            StackAction::Reveal(p) => {
+                if let Some((dir, name)) = crate::stack::reveal_target(&p) {
+                    self.stack_view.focused = false;
+                    let i = self.active;
+                    self.panes[i].want_cursor = Some(name);
+                    self.navigate(i, &dir);
+                }
+            }
+            StackAction::Send { to, mv, paths } => {
+                if paths.is_empty() {
+                    return;
+                }
+                if self.panes[to].archive.is_some() {
+                    return self.set_status("That pane is inside an archive; files can't be put into an archive that way yet", true);
+                }
+                if self.panes[to].results.is_some() {
+                    return self.set_status("That pane shows search results; open a folder there first", true);
+                }
+                let dest = self.panes[to].path.clone();
+                // Already in that folder: nothing to copy or move.
+                let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.parent() != Some(dest.as_path())).collect();
+                if paths.is_empty() {
+                    return self.set_status("It's already in that folder", true);
+                }
+                self.ask_transfer_to(mv, paths, &dest, None, true);
+            }
+        }
+    }
+
+    /// Ctrl+Shift+G: empties the stack, after a quick Enter (Esc keeps it).
+    pub fn ask_clear_stack(&mut self) {
+        let n = self.settings.stack.len();
+        if n == 0 {
+            return self.set_status("The stack is already empty", false);
+        }
+        self.modal = Some(Modal::Confirm {
+            title: "Clear the stack".into(),
+            message: format!("Take {} off the stack? The files stay where they are.", plural(n, "item")),
+            buttons: vec![("Clear".into(), Some(crate::app::Confirmed::ClearStack)), ("Cancel".into(), None)],
+            focus: 0,
+        });
+    }
+
+    /// "Show it in the pane" (the stack's menu): its folder in the active pane,
+    /// with the cursor on it.
+    pub fn stack_reveal(&mut self) {
+        if let Some(p) = self.settings.stack.get(self.stack_view.cursor).cloned().filter(|_| self.on_stack()) {
+            self.stack_action(crate::stack::StackAction::Reveal(p));
+        }
+    }
+
+    /// A finished copy: what came from the stack and was copied whole has been
+    /// put down, so it comes off. Anything skipped or failed stays on.
+    pub(crate) fn stack_put_down(&mut self, sources: &[PathBuf], copied: &[PathBuf]) {
+        let before = self.settings.stack.len();
+        let copying = &self.stack_copying;
+        self.settings.stack.retain(|p| !(copied.contains(p) && copying.contains(p)));
+        for s in sources {
+            self.stack_copying.remove(s);
+        }
+        if self.settings.stack.len() != before {
+            self.dirty = true;
+        }
+    }
+
+    /// A finished move or delete: what's gone from where it was comes off the stack too.
+    pub(crate) fn stack_forget_moved(&mut self, moved: Vec<PathBuf>) {
+        let on: Vec<PathBuf> = moved.into_iter().filter(|p| self.settings.stack.contains(p)).collect();
+        if on.is_empty() {
+            return;
+        }
+        // Asked off the UI thread: the old place may be a slow network folder.
+        let gone = crate::pane::within(std::time::Duration::from_millis(500), move || {
+            on.into_iter().filter(|p| std::fs::symlink_metadata(p).is_err()).collect::<Vec<_>>()
+        });
+        if let Some(gone) = gone.filter(|g| !g.is_empty()) {
+            self.settings.stack.retain(|p| !gone.contains(p));
+            self.dirty = true;
+        }
+    }
+
     /// Ctrl+S: typing narrows the list to matching names. Pressed again, typing
     /// goes back to jumping (the filter stays until Esc).
     pub fn toggle_filter(&mut self) {
@@ -1322,7 +1580,7 @@ impl App {
         if self.refuse_in_archive("Copying in place") {
             return;
         }
-        let Some(e) = self.panes[self.active].cursor_entry().cloned().filter(|e| !e.is_up()) else { return };
+        let Some(e) = self.cursor_item().filter(|e| !e.is_up()) else { return };
         let suggested = fs_ops::unique_copy_name(&e.path);
         let name = suggested.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let original = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1366,7 +1624,7 @@ impl App {
 
     /// "Checksum": SHA-256 of the file under the cursor, or a check of a SHA256SUMS list.
     pub fn checksum(&mut self, ctx: &egui::Context) {
-        let Some(e) = self.panes[self.active].cursor_entry().cloned().filter(|e| !e.is_up()) else { return };
+        let Some(e) = self.cursor_item().filter(|e| !e.is_up()) else { return };
         if e.is_dir {
             return self.set_status("Checksums are for files, not folders", true);
         }
@@ -1393,9 +1651,8 @@ impl App {
         if self.refuse_in_archive("Properties") {
             return;
         }
-        let pane = &self.panes[self.active];
-        let Some(e) = pane.cursor_entry() else { return };
-        let path = if e.is_up() { pane.path.clone() } else { e.path.clone() };
+        let Some(e) = self.cursor_item() else { return };
+        let path = if e.is_up() { self.panes[self.active].path.clone() } else { e.path.clone() };
         self.modal = Some(Modal::Properties(crate::properties::Properties::new(path)));
     }
 }

@@ -91,6 +91,9 @@ PDF and video previews still need poppler and ffmpeg on the computer that runs i
 | Ctrl+Shift+3 / 4 / 5 / 6 (or Ctrl+Shift+F3 / F4 / F5 / F6), or Ctrl+click a column | Then sort by name / type / date / size, for files the first sort calls equal (e.g. type, then size). Press again to reverse, a third time to turn it off |
 | Ctrl+. or Ctrl+H | Show / hide hidden files |
 | Ctrl+L | Type a location |
+| Ctrl+↓ or Ctrl+G | Put the selected files on the **stack**, or take them off (see below) |
+| Ctrl+Tab | Into the stack and back (Ctrl+←/→ there copies to a pane) |
+| Ctrl+Shift+G | Clear the stack (asks first) |
 | Ctrl+B | Bookmark this folder (bookmarks rank first in Go to) |
 | (command palette) | History: previous / next folder |
 | Ctrl+Left / Ctrl+Right | Open the folder under the cursor in the left / right pane |
@@ -116,6 +119,41 @@ resize Size and Modified; a double-click puts either back, and Ctrl+double-click
 resets them all. Both are remembered. The panes can also sit one above the
 other (Appearance → Panes, or “Panes side by side / one above the other” in the
 command palette).
+
+### The stack (Ctrl+↓ or Ctrl+G)
+
+A place to gather files and folders from all over before dealing with them.
+Ctrl+↓ (or Ctrl+G) puts the selected items (or the one under the cursor) on the stack, and
+takes them off again when they're all on it already. While anything is on it,
+a frame under the panes lists it: each item with the folder it's in, its size
+and when it was changed (in columns when there's room; folders are added up in
+the background). The header shows the total, and where things would go: the
+active pane's folder and its free space, in red when it won't all fit. Items
+whose name is already in that folder are marked ⚠, and ones that are in that
+very folder ✓ (hover for what it means). Double-click an item to open it; × takes it off, and Clear (or
+Ctrl+Shift+G) empties the stack after a quick Enter (Esc keeps it). Taking
+things off never touches the files: the stack only
+holds where they are. It's remembered between sessions, unless "Keep what's on
+it after a restart" is turned off in the settings.
+
+**Ctrl+Tab** moves the keyboard into the stack, and **Tab** (or Esc) takes it
+back to the panes. The active pane keeps its border meanwhile: that's where
+things from the stack go. In there the arrows, Home/End, Space/Insert,
+Shift+arrows and Ctrl+A work as in a pane, and so do the commands for files:
+Enter opens, Ctrl+Enter opens with, F3 views, F4 edits, F2 renames, F8 moves to
+the trash, Alt+F5 packs, Alt+Enter shows properties, Ctrl+C copies to the
+clipboard, Shift+Enter (or a right-click) shows the menu, and your own commands
+get the stack's items too. A folder opened from the stack shows in the active
+pane. **Delete** only takes an item off the stack.
+
+**Ctrl+←** / **Ctrl+→** copy the picked items (or the one under the cursor) to
+the left or right pane, and **Ctrl+Shift+←** / **→** move them (with the panes
+above each other, Ctrl+↑ / ↓). F5 and F6 copy and move to the active pane. Each
+opens the usual Copy / Move dialog with that pane's folder filled in, so Enter
+does it. Like putting things down from a pile, whatever got there (copied or
+moved) comes off the stack; anything skipped or that failed stays on, so you
+can see what's left. Deleted items come off too, and a renamed one is followed.
+To copy something to several places, put the copy back on with Ctrl+↓.
 
 ### Drag and drop
 

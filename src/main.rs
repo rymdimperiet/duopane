@@ -19,6 +19,7 @@
 //! - `open_with.rs` – "Open with" (Ctrl+Enter): apps for a file from .desktop files and mimeapps.list
 //! - `quickview.rs` – Quick view (Ctrl+Q): details of the item under the cursor
 //! - `properties.rs` – Properties (Alt+Enter): details and permissions
+//! - `stack.rs` – the stack (Ctrl+G): files gathered from anywhere, shown under the panes
 //! - `checksum.rs` – SHA-256 checksums, checked against SHA256SUMS and the like
 //! - `native_drag.rs` – drag and drop with other apps on Wayland
 //! - `theme.rs`    – colour schemes, fonts and sizes
@@ -50,6 +51,7 @@ mod rename;
 mod search;
 mod search_ui;
 mod settings;
+mod stack;
 mod theme;
 mod ui;
 mod update;

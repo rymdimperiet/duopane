@@ -1010,7 +1010,7 @@ fn read_entries(path: &Path) -> std::io::Result<Vec<Entry>> {
 }
 
 /// A regular file anyone may run (Unix permission bits; never on other systems).
-fn is_executable(m: &fs::Metadata) -> bool {
+pub(crate) fn is_executable(m: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

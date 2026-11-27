@@ -135,7 +135,7 @@ pub fn count(n: usize) -> String {
 
 enum JobMsg {
     Progress { done: u64, total: u64, current: String },
-    Done { errors: Vec<String>, cancelled: bool },
+    Done { errors: Vec<String>, cancelled: bool, copied: Vec<PathBuf> },
     Conflict(Conflict),
 }
 
@@ -150,6 +150,12 @@ pub struct JobHandle {
     pub finished: Option<(Vec<String>, bool)>,
     /// Set while the job waits for an answer about a file that already exists.
     pub conflict: Option<Conflict>,
+    /// What a move or delete job takes away from where it was (so the stack can
+    /// let go of it).
+    pub moved: Vec<PathBuf>,
+    /// A copy job's sources, and the ones copied whole (nothing skipped or failed).
+    pub sources: Vec<PathBuf>,
+    pub copied: Vec<PathBuf>,
 }
 
 impl JobHandle {
@@ -162,7 +168,10 @@ impl JobHandle {
                     self.total = total;
                     self.current = current;
                 }
-                JobMsg::Done { errors, cancelled } => self.finished = Some((errors, cancelled)),
+                JobMsg::Done { errors, cancelled, copied } => {
+                    self.finished = Some((errors, cancelled));
+                    self.copied = copied;
+                }
                 JobMsg::Conflict(c) => self.conflict = Some(c),
             }
         }
@@ -182,6 +191,15 @@ pub fn start(spec: JobSpec) -> JobHandle {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let label = spec.label();
+    let moved = match &spec {
+        JobSpec::Transfer { mv: true, items, .. } => items.iter().map(|(s, _)| s.clone()).collect(),
+        JobSpec::Delete { paths, .. } => paths.clone(),
+        _ => Vec::new(),
+    };
+    let sources = match &spec {
+        JobSpec::Transfer { mv: false, items, .. } => items.iter().map(|(s, _)| s.clone()).collect(),
+        _ => Vec::new(),
+    };
     let c = cancel.clone();
     thread::spawn(move || run(spec, tx, c));
     JobHandle {
@@ -193,6 +211,9 @@ pub fn start(spec: JobSpec) -> JobHandle {
         current: String::new(),
         finished: None,
         conflict: None,
+        moved,
+        sources,
+        copied: Vec::new(),
     }
 }
 
@@ -207,6 +228,10 @@ pub(crate) struct Ctx {
     pub(crate) policy: ConflictPolicy,
     /// Moving across drives: delete each original once it has been copied.
     moving: bool,
+    /// Files left alone because of a conflict (Skip, or "overwrite older" saying no).
+    skipped: usize,
+    /// Copies that went all the way: nothing skipped, no errors.
+    whole: Vec<PathBuf>,
 }
 
 impl Ctx {
@@ -248,7 +273,10 @@ impl Ctx {
         };
         match reply {
             Reply::Overwrite => Some(dst.to_path_buf()),
-            Reply::Skip => None,
+            Reply::Skip => {
+                self.skipped += 1;
+                None
+            }
             Reply::RenameTo(p) => self.place(new, &p),
             Reply::All(ConflictPolicy::Ask) | Reply::Cancel => {
                 self.cancel.store(true, Ordering::Relaxed);
@@ -310,7 +338,7 @@ fn run(spec: JobSpec, tx: mpsc::Sender<JobMsg>, cancel: Arc<AtomicBool>) {
         JobSpec::Transfer { policy, .. } | JobSpec::Unpack { policy, .. } | JobSpec::Extract { policy, .. } => *policy,
         _ => ConflictPolicy::Ask,
     };
-    let mut ctx = Ctx { tx, cancel, done: 0, total: 0, errors: Vec::new(), last_report: Instant::now(), policy, moving: false };
+    let mut ctx = Ctx { tx, cancel, done: 0, total: 0, errors: Vec::new(), last_report: Instant::now(), policy, moving: false, skipped: 0, whole: Vec::new() };
     match spec {
         JobSpec::Transfer { mv, items, .. } => {
             let sizes: Vec<u64> = items.iter().map(|(s, _)| tree_size(s)).collect();
@@ -336,7 +364,11 @@ fn run(spec: JobSpec, tx: mpsc::Sender<JobMsg>, cancel: Arc<AtomicBool>) {
                     continue;
                 }
                 if !mv {
+                    let before = (ctx.errors.len(), ctx.skipped);
                     copy_tree(src, dst, &mut ctx, false);
+                    if (ctx.errors.len(), ctx.skipped) == before && !ctx.cancelled() {
+                        ctx.whole.push(src.clone());
+                    }
                     continue;
                 }
                 let Some(dst) = ctx.place(&FileInfo::of(src), dst) else {
@@ -409,7 +441,7 @@ fn run(spec: JobSpec, tx: mpsc::Sender<JobMsg>, cancel: Arc<AtomicBool>) {
         }
     }
     let cancelled = ctx.cancelled();
-    let _ = ctx.tx.send(JobMsg::Done { errors: ctx.errors, cancelled });
+    let _ = ctx.tx.send(JobMsg::Done { errors: ctx.errors, cancelled, copied: ctx.whole });
 }
 
 /// True when `a` and `b` name the same directory entry (same device and inode,
@@ -720,6 +752,32 @@ mod tests {
         h.finished.unwrap().0
     }
 
+    /// The stack lets go of a copy only when all of it got there: a file skipped
+    /// because of a conflict (here, inside a folder) keeps its folder on the stack.
+    #[test]
+    fn copies_report_what_went_whole() {
+        let base = std::env::temp_dir().join(format!("duopane-whole-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("src/dir")).unwrap();
+        fs::create_dir_all(base.join("dst/dir")).unwrap();
+        fs::write(base.join("src/a.txt"), b"a").unwrap();
+        fs::write(base.join("src/dir/b.txt"), b"new").unwrap();
+        fs::write(base.join("dst/dir/b.txt"), b"old").unwrap();
+        let (a, dir) = (base.join("src/a.txt"), base.join("src/dir"));
+        let mut h = start(JobSpec::Transfer {
+            mv: false,
+            items: vec![(a.clone(), base.join("dst/a.txt")), (dir.clone(), base.join("dst/dir"))],
+            policy: ConflictPolicy::Skip,
+        });
+        while !h.poll() {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(h.sources, [a.clone(), dir]);
+        assert_eq!(h.copied, [a]);
+        assert_eq!(fs::read(base.join("dst/dir/b.txt")).unwrap(), b"old");
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn copy_and_move_folder() {
         let base = std::env::temp_dir().join(format!("duopane-test-{}", std::process::id()));
@@ -808,6 +866,8 @@ mod tests {
             last_report: Instant::now(),
             policy: ConflictPolicy::Overwrite,
             moving: false,
+            skipped: 0,
+            whole: Vec::new(),
         };
         let meta = fs::metadata(base.join("new.txt")).unwrap();
         copy_file(&base.join("new.txt"), &base.join("old.txt"), &meta, &mut ctx);

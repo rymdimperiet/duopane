@@ -97,6 +97,10 @@ pub struct Settings {
     /// Terminal used by "Open terminal here" (F9). Empty: detect one.
     pub terminal: String,
     pub bookmarks: Vec<PathBuf>,
+    /// Files and folders gathered with Ctrl+↓ / Ctrl+G (see stack.rs).
+    pub stack: Vec<PathBuf>,
+    /// Whether what's on the stack is still there after a restart.
+    pub keep_stack: bool,
     /// SFTP servers connected to from the drive menu, most recent first.
     pub sftp_recent: Vec<String>,
     /// Ask GitHub about once a day whether a newer Duopane is out (see update.rs).
@@ -163,6 +167,8 @@ impl Default for Settings {
             editor: String::new(),
             terminal: String::new(),
             bookmarks: Vec::new(),
+            stack: Vec::new(),
+            keep_stack: true,
             sftp_recent: Vec::new(),
             check_for_updates: true,
             last_update_check: None,

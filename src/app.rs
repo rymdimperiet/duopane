@@ -31,7 +31,8 @@ pub enum InputPurpose {
     Rename(PathBuf),
     NewFolder,
     NewFile,
-    Transfer { mv: bool, sources: Vec<PathBuf> },
+    /// `from_stack`: copies taken from the stack come off it once they're done.
+    Transfer { mv: bool, sources: Vec<PathBuf>, from_stack: bool },
     /// Shift+F5: a copy of this, next to it, under the name typed.
     CopyInPlace(PathBuf),
     /// Select (or deselect) by mask.
@@ -44,10 +45,16 @@ pub enum InputPurpose {
     SftpPassword { pane: usize, target: String },
 }
 
+/// What a Confirm dialog's button does.
+pub enum Confirmed {
+    Job(JobSpec),
+    ClearStack,
+}
+
 pub enum Modal {
     Input { title: String, hint: String, text: String, purpose: InputPurpose, select_chars: Option<usize>, first: bool },
     /// A question with buttons; `focus` is the one Enter presses (arrows / Tab move it).
-    Confirm { title: String, message: String, buttons: Vec<(String, Option<JobSpec>)>, focus: usize },
+    Confirm { title: String, message: String, buttons: Vec<(String, Option<Confirmed>)>, focus: usize },
     Palette(crate::dialogs::PaletteState),
     Message { title: String, text: String },
     /// Colour scheme and fonts.
@@ -155,6 +162,9 @@ pub struct App {
     pub(crate) last_paste: Instant,
     /// Quick view (Ctrl+Q): shown in place of one pane, following the other's cursor.
     pub(crate) quick_view: Option<crate::quickview::QuickView>,
+    pub(crate) stack_view: crate::stack::StackView,
+    /// Being copied from the stack: they come off it once copied.
+    pub(crate) stack_copying: std::collections::HashSet<PathBuf>,
     /// Tab presses kept from egui's own focus handling (see `raw_input_hook`).
     held_keys: Vec<Event>,
     /// What was last searched for (Ctrl+F starts with it).
@@ -165,9 +175,16 @@ pub struct App {
     foreign_hover: bool,
 }
 
+/// How long typing a name to jump to lasts after the last letter: until then,
+/// Backspace takes a letter off it rather than going up a folder.
+pub(crate) const QUICK_SEARCH_MS: u64 = 1500;
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<PathBuf>) -> Self {
-        let (settings, settings_error) = Settings::load();
+        let (mut settings, settings_error) = Settings::load();
+        if !settings.keep_stack {
+            settings.stack.clear();
+        }
         crate::pane::set_collation(settings.sort_language);
         theme::apply(&cc.egui_ctx, &settings);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
@@ -226,6 +243,8 @@ impl App {
             held_keys: Vec::new(),
             last_search: String::new(),
             quick_view: None,
+            stack_view: Default::default(),
+            stack_copying: Default::default(),
             clip: None,
             #[cfg(target_os = "linux")]
             paste_rx: None,
@@ -405,7 +424,11 @@ impl App {
             if job.poll() {
                 let (errors, cancelled) = job.finished.take().unwrap_or_default();
                 let label = past_tense(&job.label);
+                let moved = std::mem::take(&mut job.moved);
+                let (sources, copied) = (std::mem::take(&mut job.sources), std::mem::take(&mut job.copied));
                 self.job = None;
+                self.stack_forget_moved(moved);
+                self.stack_put_down(&sources, &copied);
                 if cancelled {
                     self.set_status("Cancelled", true);
                 } else if errors.is_empty() {
@@ -522,7 +545,7 @@ impl App {
             self.actions.push(Action::RunId("enter_folder"));
         }
         let (events, mods_now) = ctx.input(|i| (i.events.clone(), i.modifiers));
-        let mut searching = !self.quick.is_empty() && self.quick_at.elapsed() < Duration::from_millis(1200);
+        let mut searching = !self.quick.is_empty() && self.quick_at.elapsed() < Duration::from_millis(QUICK_SEARCH_MS);
         // Keys can arrive in bursts (fast typing, a slow frame): handle them in order,
         // and once a dialog opens, leave the rest of the burst for the dialog.
         let mut consumed = 0;
@@ -531,6 +554,34 @@ impl App {
             let ev = events[consumed].clone();
             consumed += 1;
             match ev {
+                Event::Key { key, pressed: true, modifiers, .. } if self.stack_view.focused => {
+                    skip_text = true;
+                    let shortcut = Shortcut::from_event(key, modifiers);
+                    let bound = self.bindings.get(&shortcut).copied();
+                    if let Some(a) = self.stack_view.key(&mut self.settings.stack, key, modifiers, self.active, self.settings.stacked_panes) {
+                        self.stack_action(a);
+                    } else if let Some(cmd) = bound {
+                        // What works on the stack's items, and the window-wide commands.
+                        let id = match cmd {
+                            CmdRef::Builtin(i) => self.commands[i].id,
+                            CmdRef::Custom(_) => "",
+                        };
+                        if matches!(cmd, CmdRef::Custom(_)) || crate::stack::WORKS_HERE.contains(&id) {
+                            if id == "switch_pane" {
+                                self.stack_view.focused = false;
+                            } else {
+                                // Go to opens a folder in the pane: the keyboard goes along.
+                                if id == "go_to" {
+                                    self.stack_view.focused = false;
+                                }
+                                self.run(ctx, cmd);
+                            }
+                        }
+                    }
+                    if self.modal.is_some() {
+                        break;
+                    }
+                }
                 Event::Key { key, pressed: true, modifiers, .. } => {
                     skip_text = false;
                     let plain = !modifiers.command && !modifiers.ctrl && !modifiers.alt;
@@ -540,6 +591,20 @@ impl App {
                     if plain && self.move_key(key, modifiers.shift) {
                         self.quick.clear();
                         searching = false;
+                        continue;
+                    }
+                    // While typing a name to jump to, Backspace takes a letter off it
+                    // (rather than going up a folder).
+                    if plain && !modifiers.shift && searching && key == Key::Backspace {
+                        self.quick.pop();
+                        self.quick_at = Instant::now();
+                        if self.quick.is_empty() {
+                            searching = false;
+                            self.status = None;
+                        } else {
+                            let q = self.quick.clone();
+                            self.panes[self.active].quick_find(&q);
+                        }
                         continue;
                     }
                     // While typing a name to jump to, "+" and "-" are part of the name.
@@ -565,7 +630,8 @@ impl App {
                 Event::Cut => self.run_id(ctx, "clip_cut"),
                 Event::Paste(_) => self.run_id(ctx, "clip_paste"),
                 Event::Text(t) => {
-                    if std::mem::take(&mut skip_text) {
+                    // Typing a name jumps in a pane, not in the stack.
+                    if std::mem::take(&mut skip_text) || self.stack_view.focused {
                         continue;
                     }
                     // Some systems send invisible codes with Alt and similar keys: those aren't a name search.
@@ -583,7 +649,7 @@ impl App {
                         self.panes[self.active].invert_selection();
                         continue;
                     }
-                    if self.quick_at.elapsed() > Duration::from_millis(1200) {
+                    if self.quick_at.elapsed() > Duration::from_millis(QUICK_SEARCH_MS) {
                         self.quick.clear();
                     }
                     self.quick.push_str(&t);
@@ -664,14 +730,25 @@ impl App {
     fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::Activate(i) => {
+                self.stack_view.focused = false;
                 if self.active != i {
                     self.active = i;
                     self.quick.clear();
                 }
             }
-            Action::Run(c) => self.run(ctx, c),
+            Action::Run(c) => {
+                // From the palette or the key bar: a command that works on a pane
+                // takes the keyboard back there first.
+                if let CmdRef::Builtin(i) = c {
+                    if self.stack_view.focused && !crate::stack::WORKS_HERE.contains(&self.commands[i].id) {
+                        self.stack_view.focused = false;
+                    }
+                }
+                self.run(ctx, c);
+            }
             Action::RunId(id) => self.run_id(ctx, id),
             Action::Navigate(i, p) => {
+                self.stack_view.focused = false;
                 self.active = i;
                 self.navigate(i, &p);
             }
@@ -825,6 +902,7 @@ impl eframe::App for App {
         self.files_dropped_in(ctx);
         self.follow_quick_view(ctx);
         self.bottom_bar(ctx);
+        self.stack_ui(ctx);
         self.panes_ui(ctx);
         self.modal_ui(ctx);
         self.hand_drag_to_desktop(ctx);

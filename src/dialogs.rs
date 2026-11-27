@@ -2,7 +2,7 @@
 //! searchable list used by "Go to" and the command palette.
 
 use crate::app::{expand_tilde, subdirs, tilde, Action, App, CmdRef, InputPurpose, Modal};
-use crate::fs_ops::{ConflictPolicy, FileInfo, JobSpec, Reply};
+use crate::fs_ops::{ConflictPolicy, FileInfo, Reply};
 use crate::fuzzy;
 use crate::theme;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Modifiers, Sense};
@@ -146,7 +146,7 @@ impl App {
         let mut pack_ok = false;
         let mut batch_ok = false;
         let mut unpack_ok = false;
-        let mut start: Option<JobSpec> = None;
+        let mut start: Option<crate::app::Confirmed> = None;
         let mut pick: Option<PaletteTarget> = None;
         let mut places_pick = None;
         let mut permissions: Option<(PathBuf, u32)> = None;
@@ -564,6 +564,12 @@ impl App {
                         }
                         ui.end_row();
 
+                        ui.label("Stack");
+                        if ui.checkbox(&mut self.settings.keep_stack, "Keep what's on it after a restart").changed() {
+                            self.dirty = true;
+                        }
+                        ui.end_row();
+
                         ui.label("Folders");
                         if ui.checkbox(&mut self.settings.show_dotdot, "Show “..” at the top to go up a level").changed() {
                             for p in &mut self.panes {
@@ -707,8 +713,13 @@ impl App {
         if !close {
             self.modal = Some(modal);
         }
-        if let Some(spec) = start {
-            self.start_job(spec);
+        match start {
+            Some(crate::app::Confirmed::Job(spec)) => self.start_job(spec),
+            Some(crate::app::Confirmed::ClearStack) => {
+                self.settings.stack.clear();
+                self.dirty = true;
+            }
+            None => {}
         }
         if let Some(o) = places_pick {
             self.places_outcome(o);
@@ -1100,7 +1111,7 @@ fn text_width(ui: &egui::Ui, s: &str, font: &FontId) -> f32 {
 }
 
 /// Shortens text to fit `max_w` by cutting its start ("…/photos/2024"); empty if nothing fits.
-fn fit_end(ui: &egui::Ui, text: &str, max_w: f32, font: &FontId) -> String {
+pub(crate) fn fit_end(ui: &egui::Ui, text: &str, max_w: f32, font: &FontId) -> String {
     if text_width(ui, text, font) <= max_w {
         return text.to_string();
     }
