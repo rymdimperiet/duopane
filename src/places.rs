@@ -1304,7 +1304,12 @@ mod tests {
         std::fs::write(&point, "").unwrap();
         let run = || {
             let mut c = std::process::Command::new(&fake).args(["-f"]).arg(&point).stdout(std::process::Stdio::null()).spawn().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Wait until it really is running as the fake (a busy machine can take a while).
+            let exe = PathBuf::from(format!("/proc/{}/exe", c.id()));
+            let t = std::time::Instant::now();
+            while std::fs::read_link(&exe).ok().as_ref() != Some(&fake) && t.elapsed() < std::time::Duration::from_secs(10) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             let found = fuse_command(&point);
             let _ = c.kill();
             let _ = c.wait();
