@@ -63,10 +63,17 @@ fn check_list(path: &Path, name: &str, dir: &Path, cancel: &Arc<AtomicBool>) -> 
     if entries.is_empty() {
         return Report { title, text: format!("{name} has no SHA-256 checksums in it."), hash: None };
     }
-    let (mut good, mut bad, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut good, mut bad, mut missing, mut outside) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (want, file) in entries {
         if cancel.load(Ordering::Relaxed) {
             break;
+        }
+        // Only files in the list's folder and below: a planted list mustn't be able
+        // to ask about ~/.ssh/id_rsa.
+        let p = Path::new(&file);
+        if p.is_absolute() || p.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
+            outside.push(file);
+            continue;
         }
         let target: PathBuf = dir.join(&file);
         match sha256_file(&target, cancel) {
@@ -81,6 +88,9 @@ fn check_list(path: &Path, name: &str, dir: &Path, cancel: &Arc<AtomicBool>) -> 
     }
     if !missing.is_empty() {
         text.push_str(&format!("Not found or unreadable:\n  {}\n\n", missing.join("\n  ")));
+    }
+    if !outside.is_empty() {
+        text.push_str(&format!("Skipped, as they're outside this folder:\n  {}\n\n", outside.join("\n  ")));
     }
     if !good.is_empty() {
         text.push_str(&format!("✓ Match:\n  {}", good.join("\n  ")));
@@ -291,7 +301,7 @@ mod tests {
         let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         std::fs::write(dir.join("a.iso"), "abc").unwrap();
         std::fs::write(dir.join("b.iso"), "abd").unwrap();
-        std::fs::write(dir.join("SHA256SUMS"), format!("{abc}  a.iso\n{abc} *b.iso\n{abc}  ./gone.iso\n")).unwrap();
+        std::fs::write(dir.join("SHA256SUMS"), format!("{abc}  a.iso\n{abc} *b.iso\n{abc}  ./gone.iso\n{abc}  /etc/passwd\n{abc}  ../up.iso\n")).unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
 
         let r = check(&dir.join("a.iso"), &cancel);
@@ -304,6 +314,7 @@ mod tests {
         assert!(r.text.contains("Don't match (damaged or incomplete):\n  b.iso"), "{}", r.text);
         assert!(r.text.contains("Not found or unreadable:\n  gone.iso"), "{}", r.text);
         assert!(r.text.contains("✓ Match:\n  a.iso"), "{}", r.text);
+        assert!(r.text.contains("Skipped, as they're outside this folder:\n  /etc/passwd\n  ../up.iso"), "{}", r.text);
 
         // A list holding just the hash, BSD style lines.
         std::fs::write(dir.join("c.txt"), "abc").unwrap();

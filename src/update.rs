@@ -53,7 +53,8 @@ fn parse(json: &str) -> Option<Release> {
         return None;
     }
     let version = v["tag_name"].as_str()?.trim_start_matches('v').to_string();
-    let url = v["html_url"].as_str().unwrap_or(RELEASES).to_string();
+    // Only ever a page of this project's releases: the link is opened as it is.
+    let url = v["html_url"].as_str().filter(|u| u.starts_with("https://github.com/rymdimperiet/duopane/releases/")).unwrap_or(RELEASES).to_string();
     Some(Release { version, url })
 }
 
@@ -90,8 +91,12 @@ mod tests {
 
     #[test]
     fn release_answer() {
-        let r = parse(r#"{"tag_name":"v0.5.0","html_url":"https://example.org/r","draft":false,"prerelease":false}"#).unwrap();
-        assert_eq!(r, Release { version: "0.5.0".into(), url: "https://example.org/r".into() });
+        let ours = "https://github.com/rymdimperiet/duopane/releases/tag/v0.5.0";
+        let r = parse(&format!(r#"{{"tag_name":"v0.5.0","html_url":"{ours}","draft":false,"prerelease":false}}"#)).unwrap();
+        assert_eq!(r, Release { version: "0.5.0".into(), url: ours.into() });
+        // A link anywhere else is never opened; the releases page is instead.
+        let r = parse(r#"{"tag_name":"v0.5.0","html_url":"file:///etc/passwd","draft":false,"prerelease":false}"#).unwrap();
+        assert_eq!(r.url, RELEASES);
         assert_eq!(parse(r#"{"tag_name":"v0.6.0-rc1","prerelease":true}"#), None);
         assert_eq!(parse("not json"), None);
     }

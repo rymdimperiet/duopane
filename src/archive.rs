@@ -330,7 +330,7 @@ fn unpack_zip(archive: &Path, dest: &Path, ctx: &mut Ctx) -> io::Result<()> {
             #[cfg(unix)]
             if let Some(mode) = f.unix_mode() {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&out, fs::Permissions::from_mode(mode & 0o7777));
+                let _ = fs::set_permissions(&out, fs::Permissions::from_mode(crate::fs_ops::plain_mode(mode, false)));
             }
             if let Some(t) = f.last_modified().and_then(zip_to_system) {
                 let _ = w.set_modified(t);
@@ -357,7 +357,8 @@ fn unpack_tar(archive: &Path, dest: &Path, ctx: &mut Ctx) -> io::Result<()> {
     let file = Counting { inner: BufReader::new(File::open(archive)?), count: count.clone() };
     let reader: Box<dyn Read> = if is_gzip(archive) { Box::new(flate2::read::GzDecoder::new(file)) } else { Box::new(file) };
     let mut ar = tar::Archive::new(reader);
-    ar.set_preserve_permissions(true);
+    // Without setuid and setgid (tar keeps them only when preserving everything).
+    ar.set_preserve_permissions(false);
     ar.set_preserve_mtime(true);
     for entry in ar.entries()? {
         if ctx.cancelled() {
@@ -384,6 +385,11 @@ fn unpack_tar(archive: &Path, dest: &Path, ctx: &mut Ctx) -> io::Result<()> {
                 }
                 Some(p) if p != out => {
                     // Renamed: unpack under the new name (same folder, checked like any other).
+                    if is_hard_link(&e) {
+                        ctx.error(&p, HARD_LINK);
+                        ctx.done = base + count.get();
+                        continue;
+                    }
                     let r = no_links_on_the_way(dest, p.strip_prefix(dest).unwrap_or(&p)).and_then(|_| e.unpack(&p).map(|_| ()));
                     if let Err(err) = r {
                         ctx.error(&p, err);
@@ -572,7 +578,7 @@ pub fn extract(archive: &Path, items: &[String], base: &str, dest: &Path, ctx: &
                 #[cfg(unix)]
                 if let Some(mode) = f.unix_mode() {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&out, fs::Permissions::from_mode(mode & 0o7777));
+                    let _ = fs::set_permissions(&out, fs::Permissions::from_mode(crate::fs_ops::plain_mode(mode, false)));
                 }
                 if let Some(t) = f.last_modified().and_then(zip_to_system) {
                     let _ = w.set_modified(t);
@@ -593,6 +599,10 @@ pub fn extract(archive: &Path, items: &[String], base: &str, dest: &Path, ctx: &
                     continue;
                 }
                 let out = target(&name);
+                if is_hard_link(&e) {
+                    ctx.error(&out, HARD_LINK);
+                    continue;
+                }
                 if let Err(err) = no_links_on_the_way(dest, out.strip_prefix(dest).unwrap_or(&out)) {
                     ctx.error(&out, err);
                     continue;
@@ -626,6 +636,15 @@ pub fn extract(archive: &Path, items: &[String], base: &str, dest: &Path, ctx: &
     }
 }
 
+/// `Entry::unpack` without a folder to stay in takes a hard link's target as
+/// written: "notes.txt" could become a second name for ~/.bashrc. Only `unpack_in`
+/// keeps targets inside, so everywhere else hard links are refused.
+fn is_hard_link<R: Read>(e: &tar::Entry<R>) -> bool {
+    e.header().entry_type() == tar::EntryType::Link
+}
+
+const HARD_LINK: &str = "skipped a hard link (only unpacking the whole archive makes those)";
+
 /// Unpacks one file from an archive to `out` (used to view or open it).
 pub fn extract_one(archive: &Path, inner: &str, out: &Path) -> Result<(), String> {
     if let Some(p) = out.parent() {
@@ -636,7 +655,8 @@ pub fn extract_one(archive: &Path, inner: &str, out: &Path) -> Result<(), String
         for i in 0..z.len() {
             let mut f = z.by_index(i).map_err(|e| e.to_string())?;
             if clean_name(f.name()).as_deref() == Some(inner) && !f.is_dir() {
-                let mut w = File::create(out).map_err(|e| e.to_string())?;
+                // A new file: never write through something already there.
+                let mut w = fs::OpenOptions::new().write(true).create_new(true).open(out).map_err(|e| e.to_string())?;
                 io::copy(&mut f, &mut w).map_err(|e| e.to_string())?;
                 return Ok(());
             }
@@ -649,6 +669,9 @@ pub fn extract_one(archive: &Path, inner: &str, out: &Path) -> Result<(), String
             let mut e = e.map_err(|e| e.to_string())?;
             let name = e.path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
             if clean_name(&name).as_deref() == Some(inner) {
+                if is_hard_link(&e) {
+                    return Err(HARD_LINK.into());
+                }
                 e.unpack(out).map_err(|e| e.to_string())?;
                 return Ok(());
             }
@@ -886,6 +909,19 @@ mod tests {
                 file(&mut tb, "link/evil.txt");
                 link(&mut tb, "trap", &victim);
                 file(&mut tb, "trap");
+                // Hard links to the victim, by absolute path and climbing out.
+                let hard = |tb: &mut tar::Builder<File>, name: &str, to: &Path| {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_entry_type(tar::EntryType::Link);
+                    h.set_size(0);
+                    h.set_mode(0o644);
+                    tb.append_link(&mut h, name, to).unwrap();
+                };
+                hard(&mut tb, "hard", &victim);
+                // Relative ones are taken from the working folder.
+                let cwd = std::env::current_dir().unwrap();
+                let up: PathBuf = cwd.components().skip(1).map(|_| "..").collect();
+                hard(&mut tb, "hard2", &up.join(victim.strip_prefix("/").unwrap()));
                 tb.finish().unwrap();
             }
         }
@@ -909,13 +945,24 @@ mod tests {
             wait(start(JobSpec::Unpack { archives: vec![arc.clone()], dest: unpack_to.clone(), into_folder: false, policy: ConflictPolicy::Overwrite }));
             wait(start(JobSpec::Extract {
                 archive: arc.clone(),
-                items: vec!["link".into(), "trap".into()],
+                items: vec!["link".into(), "trap".into(), "hard".into(), "hard2".into()],
                 base: String::new(),
                 dest: extract_to.clone(),
                 policy: ConflictPolicy::Overwrite,
             }));
             assert!(!outside.join("evil.txt").exists(), "{format:?} wrote through a link");
             assert_eq!(fs::read(outside.join("victim.txt")).unwrap(), b"precious", "{format:?} overwrote the link target");
+            // Nothing unpacked may be the victim under another name.
+            use std::os::unix::fs::MetadataExt;
+            let victim_ino = fs::metadata(outside.join("victim.txt")).unwrap().ino();
+            let one = base.join(format!("one-{}", format.ext()));
+            for name in ["hard", "hard2"] {
+                let _ = extract_one(&arc, name, &one.join(name));
+                for dir in [&unpack_to, &extract_to, &one] {
+                    let m = fs::metadata(dir.join(name));
+                    assert!(m.is_err() || m.unwrap().ino() != victim_ino, "{format:?}: {name} in {} is the victim", dir.display());
+                }
+            }
         }
         let _ = fs::remove_dir_all(&base);
     }

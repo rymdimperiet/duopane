@@ -540,7 +540,11 @@ fn copy_tree(src: &Path, dst: &Path, ctx: &mut Ctx, placed: bool) {
         }
     } else if ft.is_dir() {
         if !dst.exists() {
-            if let Err(e) = fs::create_dir(&dst) {
+            // Private while it fills up; its own permissions come at the end.
+            let mut b = fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+            if let Err(e) = b.create(&dst) {
                 return ctx.error(&dst, e);
             }
         }
@@ -551,10 +555,11 @@ fn copy_tree(src: &Path, dst: &Path, ctx: &mut Ctx, placed: bool) {
         for child in children.flatten() {
             copy_tree(&child.path(), &dst.join(child.file_name()), ctx, false);
             if ctx.cancelled() {
+                let _ = fs::set_permissions(&dst, plain_permissions(&meta));
                 return;
             }
         }
-        let _ = fs::set_permissions(&dst, meta.permissions());
+        let _ = fs::set_permissions(&dst, plain_permissions(&meta));
         if ctx.moving {
             // Only goes if everything in it was moved; skipped or failed files keep it.
             let _ = fs::remove_dir(src);
@@ -562,6 +567,24 @@ fn copy_tree(src: &Path, dst: &Path, ctx: &mut Ctx, placed: bool) {
     } else if copy_file(src, &dst, &meta, ctx) {
         forget_original(src, ctx);
     }
+}
+
+/// The permissions a copy gets: the original's, without setuid and setgid (as `cp`
+/// does). Run as root, copying someone's program could otherwise make it setuid root.
+/// Folders keep the sticky bit.
+pub fn plain_permissions(meta: &fs::Metadata) -> fs::Permissions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::Permissions::from_mode(plain_mode(meta.permissions().mode(), meta.is_dir()))
+    }
+    #[cfg(not(unix))]
+    meta.permissions()
+}
+
+/// Permission bits without setuid and setgid; folders keep the sticky bit.
+pub fn plain_mode(mode: u32, is_dir: bool) -> u32 {
+    mode & if is_dir { 0o1777 } else { 0o777 }
 }
 
 /// While moving: deletes the original of something that has just been copied.
@@ -580,7 +603,12 @@ fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, ctx: &mut Ctx) -> bool
     let tmp = part_name(dst);
     let result = (|| -> std::io::Result<bool> {
         let mut input = File::open(src)?;
-        let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        // Only we can read it until it's complete; then it gets the original's permissions.
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        let mut output = opts.open(&tmp)?;
         let mut buf = vec![0u8; 1 << 20];
         loop {
             if ctx.cancelled() {
@@ -594,7 +622,7 @@ fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, ctx: &mut Ctx) -> bool
             ctx.done += n as u64;
             ctx.report(src, false);
         }
-        output.set_permissions(meta.permissions())?;
+        output.set_permissions(plain_permissions(meta))?;
         if let Ok(t) = meta.modified() {
             let _ = output.set_modified(t);
         }
@@ -722,6 +750,28 @@ mod tests {
         let errs = wait(start(JobSpec::Delete { paths: vec![out.join("moved")], permanent: true }));
         assert!(errs.is_empty());
         assert!(!out.join("moved").exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copies_keep_permissions_but_not_setuid() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = fresh("perms");
+        let src = base.join("src");
+        fs::create_dir_all(&src).unwrap();
+        for (name, mode) in [("private", 0o600), ("program", 0o6755)] {
+            fs::write(src.join(name), "x").unwrap();
+            fs::set_permissions(src.join(name), fs::Permissions::from_mode(mode)).unwrap();
+        }
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o750)).unwrap();
+        let errs = wait(start(JobSpec::Transfer { mv: false, items: vec![(src.clone(), base.join("out"))], policy: ConflictPolicy::Overwrite }));
+        assert!(errs.is_empty(), "{errs:?}");
+        let mode = |p: &str| fs::metadata(base.join(p)).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode("out/private"), 0o600);
+        assert_eq!(mode("out/program"), 0o755, "setuid and setgid are dropped");
+        assert_eq!(mode("out"), 0o750, "the folder gets its own permissions in the end");
+        assert_eq!(plain_mode(0o1777, true), 0o1777, "folders keep the sticky bit");
         let _ = fs::remove_dir_all(&base);
     }
 

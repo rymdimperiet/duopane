@@ -440,12 +440,20 @@ fn unit_mount(text: &str, home: &Path) -> Option<(PathBuf, String)> {
 }
 
 /// The command line of the program serving a FUSE mount (rclone, sshfs, …), so it
-/// can be run again; the mount point in it made absolute.
+/// can be run again; the mount point in it made absolute. Only our own processes
+/// count, and the program is named by where it really is: another user's process
+/// (or a "sshfs" in /tmp) must never become a command we run later.
+#[cfg(unix)]
 fn fuse_command(point: &Path) -> Option<Vec<String>> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let me = std::process::id().to_string();
+    let uid = std::fs::metadata("/proc/self").ok()?.uid();
     for e in std::fs::read_dir("/proc").ok()?.flatten() {
         let pid = e.file_name().to_string_lossy().into_owned();
         if pid == me || !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if e.metadata().ok().map(|m| m.uid()) != Some(uid) {
             continue;
         }
         let Ok(raw) = std::fs::read(e.path().join("cmdline")) else { continue };
@@ -457,9 +465,22 @@ fn fuse_command(point: &Path) -> Option<Vec<String>> {
         if !["rclone", "sshfs", "s3fs", "gocryptfs", "encfs", "davfs2", "bindfs", "mergerfs", "ntfs-3g", "fuse-zip", "archivemount"].contains(&program.as_str()) {
             continue;
         }
+        // The program itself, and only from a folder others can't write to.
+        let Ok(exe) = std::fs::read_link(e.path().join("exe")) else { continue };
+        let writable_by_others = |p: &Path| std::fs::metadata(p).map_or(true, |m| m.permissions().mode() & 0o022 != 0 || (m.uid() != 0 && m.uid() != uid));
+        let same_program = exe.file_name().is_some_and(|n| n.to_string_lossy() == program);
+        if !same_program || !exe.is_absolute() || writable_by_others(&exe) || exe.parent().is_none_or(writable_by_others) {
+            continue;
+        }
+        args[0] = exe.to_string_lossy().into_owned();
         args[i] = point.to_string_lossy().into_owned();
         return Some(args);
     }
+    None
+}
+
+#[cfg(not(unix))]
+fn fuse_command(_: &Path) -> Option<Vec<String>> {
     None
 }
 
@@ -1264,6 +1285,41 @@ mod tests {
         assert_eq!(sftp_error("per@nas: Permission denied (publickey,password).", false), MountError::NeedsPassword);
         assert_eq!(sftp_error("Permission denied, please try again.", true), MountError::Failed("the password wasn't accepted".into()));
         assert!(matches!(sftp_error("ssh: Could not resolve hostname nope: Name or service not known\nread: Connection reset by peer", false), MountError::Failed(m) if m.contains("find")));
+    }
+
+    /// A "sshfs" that another user could have put there, or that isn't the program
+    /// it claims to be, is never remembered as the command to mount again.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mount_commands_only_come_from_safe_programs() {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(tail) = which("tail") else { return };
+        let base = std::env::temp_dir().join(format!("duopane-fusecmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("sshfs");
+        std::fs::copy(&tail, &fake).unwrap();
+        let point = base.join("point");
+        std::fs::write(&point, "").unwrap();
+        let run = || {
+            let mut c = std::process::Command::new(&fake).args(["-f"]).arg(&point).stdout(std::process::Stdio::null()).spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let found = fuse_command(&point);
+            let _ = c.kill();
+            let _ = c.wait();
+            found
+        };
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(run(), None, "a folder anyone can write to");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(run(), Some(vec![fake.to_string_lossy().into_owned(), "-f".into(), point.to_string_lossy().into_owned()]));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn which(name: &str) -> Result<PathBuf, ()> {
+        std::env::split_paths(&std::env::var_os("PATH").ok_or(())?).map(|d| d.join(name)).find(|p| p.is_file()).ok_or(())
     }
 
     #[test]

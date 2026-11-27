@@ -174,7 +174,13 @@ impl App {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-        let out = temp_area().join(n.to_string()).join(name);
+        let out = match temp_area() {
+            Ok(t) => t.join(n.to_string()).join(name),
+            Err(e) => {
+                self.set_status(format!("Couldn't unpack it: {e}"), true);
+                return None;
+            }
+        };
         match crate::archive::extract_one(&file, &inner, &out) {
             Ok(()) => Some(out),
             Err(e) => {
@@ -1080,12 +1086,8 @@ impl App {
         let dir = pane.path.display().to_string();
         let other = self.panes[self.other()].path.display().to_string();
         let selected: Vec<String> = pane.targets().iter().map(|p| p.display().to_string()).collect();
-        let cmd = c
-            .run
-            .replace("{path}", &shell_quote(&path))
-            .replace("{dir}", &shell_quote(&dir))
-            .replace("{other}", &shell_quote(&other))
-            .replace("{selected}", &selected.iter().map(|s| shell_quote(s)).collect::<Vec<_>>().join(" "));
+        let all = selected.iter().map(|s| shell_quote(s)).collect::<Vec<_>>().join(" ");
+        let cmd = fill_placeholders(&c.run, &[("{path}", shell_quote(&path)), ("{dir}", shell_quote(&dir)), ("{other}", shell_quote(&other)), ("{selected}", all)]);
         let res = Process::new("sh")
             .arg("-c")
             .arg(&cmd)
@@ -1257,8 +1259,38 @@ fn find_in_path(name: &str) -> bool {
 }
 
 /// Where files unpacked from archives (for viewing or opening) go; removed on exit.
-pub fn temp_area() -> PathBuf {
-    std::env::temp_dir().join(format!("duopane-{}", std::process::id()))
+/// A new folder only we can enter, with a name nobody can guess: in a shared
+/// /tmp, another user could otherwise make it first and plant links in it.
+pub fn temp_area() -> Result<PathBuf, String> {
+    TEMP_AREA.get_or_init(make_temp_area).clone()
+}
+
+static TEMP_AREA: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+
+/// The temporary folder, if one was made (for removing it on exit).
+pub fn temp_area_made() -> Option<PathBuf> {
+    TEMP_AREA.get().and_then(|r| r.as_ref().ok().cloned())
+}
+
+fn make_temp_area() -> Result<PathBuf, String> {
+    use std::hash::{BuildHasher, Hasher};
+    // The user's own runtime folder when there is one; it's private already.
+    let root = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
+    let mut err = String::new();
+    for _ in 0..10 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        let dir = root.join(format!("duopane-{}-{:016x}", std::process::id(), h.finish()));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+        // `create`, not `create_dir_all`: a folder that's already there isn't ours.
+        match b.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) => err = e.to_string(),
+        }
+    }
+    Err(format!("couldn't make a temporary folder: {err}"))
 }
 
 impl App {
@@ -1413,9 +1445,65 @@ fn pick_restores(items: Vec<trash::TrashItem>, paths: &[PathBuf]) -> Vec<(PathBu
     paths.iter().map(|p| (p.clone(), best.remove(&real(p)).or_else(|| best.remove(p)))).collect()
 }
 
+/// Puts the values in for the placeholders, in one pass from left to right.
+/// Replacing one placeholder after another would look for the later ones inside
+/// the values already put in: a file named `x{selected}` would then have its
+/// quoting broken, and the rest of its name read by the shell as commands.
+fn fill_placeholders(template: &str, values: &[(&str, String)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    'outer: while !rest.is_empty() {
+        for (key, value) in values {
+            if let Some(after) = rest.strip_prefix(key) {
+                out.push_str(value);
+                rest = after;
+                continue 'outer;
+            }
+        }
+        let c = rest.chars().next().unwrap_or_default();
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_temporary_folder_is_new_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let a = make_temp_area().unwrap();
+        let b = make_temp_area().unwrap();
+        assert_ne!(a, b, "names can't be guessed from the process id alone");
+        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::remove_dir(&a).unwrap();
+        std::fs::remove_dir(&b).unwrap();
+    }
+
+    /// A file name holding a placeholder and shell code must reach the command as
+    /// one quoted word, whatever placeholders the command uses.
+    #[cfg(unix)]
+    #[test]
+    fn file_names_cant_break_out_of_custom_commands() {
+        let dir = std::env::temp_dir().join(format!("duopane-custom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["x{selected}$(touch PWNED)", "x{path}'$(touch PWNED)'", "{dir}{other}`touch PWNED`"] {
+            let path = dir.join(name).display().to_string();
+            let values = [("{path}", shell_quote(&path)), ("{dir}", shell_quote(&path)), ("{other}", shell_quote("o")), ("{selected}", shell_quote(&path))];
+            for template in ["printf %s {path}", "printf %s {selected}", "printf %s {dir}"] {
+                let cmd = fill_placeholders(template, &values);
+                let out = std::process::Command::new("sh").arg("-c").arg(&cmd).current_dir(&dir).output().unwrap();
+                assert_eq!(String::from_utf8_lossy(&out.stdout), path, "{cmd}");
+                assert!(!dir.join("PWNED").exists(), "{cmd} ran code from the file name");
+            }
+        }
+        assert_eq!(fill_placeholders("a {path} b {selected}{dir}", &[("{path}", "P".into()), ("{dir}", "D".into()), ("{selected}", "S".into())]), "a P b SD");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_newest_trashed_copy_comes_back() {

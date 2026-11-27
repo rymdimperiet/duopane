@@ -374,7 +374,8 @@ pub fn index_age() -> Option<Duration> {
 fn run_plocate(q: &Query, root: &Path, hidden: bool, tx: &mpsc::Sender<Msg>, cancel: &AtomicBool, slot: &Mutex<Option<Child>>) {
     // plocate wants every pattern to match the full path; a mask goes in as a glob.
     let mut cmd = Command::new("plocate");
-    cmd.args(["-i", "-0"]).args(&q.words).args(&q.masks).stdout(Stdio::piped()).stderr(Stdio::null());
+    // "--": a word starting with "-" is something to look for, not an option.
+    cmd.args(["-i", "-0", "--"]).args(&q.words).args(&q.masks).stdout(Stdio::piped()).stderr(Stdio::null());
     let Ok(mut child) = cmd.spawn() else { return };
     let Some(out) = child.stdout.take() else { return };
     if let Ok(mut s) = slot.lock() {

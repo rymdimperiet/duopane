@@ -844,7 +844,9 @@ impl eframe::App for App {
 impl Drop for App {
     fn drop(&mut self) {
         // Files unpacked from archives for viewing are only needed while we run.
-        let _ = std::fs::remove_dir_all(crate::actions::temp_area());
+        if let Some(t) = crate::actions::temp_area_made() {
+            let _ = std::fs::remove_dir_all(t);
+        }
         self.store_pane_state();
         let _ = self.settings.save();
     }
