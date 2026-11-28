@@ -117,6 +117,11 @@ pub fn parse_hex(s: &str) -> Option<Color32> {
 }
 
 /// Applies the scheme, custom colours, fonts and text size from the settings.
+/// Lists stop hard at their ends instead of springing back (why: see `apply`).
+pub fn no_rubber_band(ctx: &egui::Context) {
+    ctx.all_styles_mut(|st| st.spacing.scroll.kinetic.rubber_band = false);
+}
+
 pub fn apply(ctx: &egui::Context, s: &Settings) {
     let mut th = SCHEMES.iter().find(|(n, _)| *n == s.color_scheme).map(|x| x.1).unwrap_or(SCHEMES[0].1);
     for (k, v) in &s.custom_colors {
@@ -182,6 +187,11 @@ pub fn apply(ctx: &egui::Context, s: &Settings) {
     apply_fonts(ctx, (&s.ui_font, s.ui_font_weight), (&s.mono_font, s.mono_font_weight));
 
     let size = s.font_size;
+    // No springing back from past the end of a list. egui measures "past the end"
+    // against the list as it was last frame, so a folder's remembered scroll
+    // position, set on the frame its (longer) list first shows, would be pulled
+    // back and the momentum left over would send the list racing off.
+    no_rubber_band(ctx);
     ctx.global_style_mut(|st| {
         st.text_styles.insert(TextStyle::Body, FontId::new(size, FontFamily::Proportional));
         st.text_styles.insert(TextStyle::Button, FontId::new(size, FontFamily::Proportional));

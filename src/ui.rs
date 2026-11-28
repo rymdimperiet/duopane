@@ -973,9 +973,16 @@ mod tests {
         for i in 0..120 {
             std::fs::create_dir_all(base.join(format!("folder {i:03}"))).unwrap();
         }
+        // The folder we step into scrolls too, but not as far: coming back up, the
+        // remembered position is past its end until the longer list has been
+        // drawn once. (egui used to spring that back, sending the list racing off.)
+        for i in 0..40 {
+            std::fs::write(base.join(format!("folder 050/file {i:02}")), b"").unwrap();
+        }
         let base = base.canonicalize().unwrap();
         let mut panes = [Pane::new(&base, false, false, SortKey::Name, true), Pane::new(&base, false, false, SortKey::Name, true)];
         let ctx = egui::Context::default();
+        crate::theme::no_rubber_band(&ctx);
         let mut actions = Vec::new();
         let settle = |panes: &mut [Pane; 2], actions: &mut Vec<Action>| {
             while panes[0].is_loading() {
