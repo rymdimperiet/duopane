@@ -1304,12 +1304,20 @@ mod tests {
         std::fs::write(&point, "").unwrap();
         let run = || {
             let mut c = std::process::Command::new(&fake).args(["-f"]).arg(&point).stdout(std::process::Stdio::null()).spawn().unwrap();
-            // Wait until it really is running as the fake (a busy machine can take a while).
-            let exe = PathBuf::from(format!("/proc/{}/exe", c.id()));
+            // Wait until it really is running as the fake (a busy machine can take a
+            // while). The kernel names the new program in `exe` a moment before its
+            // arguments show in `cmdline`, so wait for both.
+            let proc = PathBuf::from(format!("/proc/{}", c.id()));
+            let point_bytes = point.as_os_str().as_encoded_bytes();
+            let started = || {
+                std::fs::read_link(proc.join("exe")).ok().as_ref() == Some(&fake)
+                    && std::fs::read(proc.join("cmdline")).is_ok_and(|c| c.split(|b| *b == 0).any(|a| a == point_bytes))
+            };
             let t = std::time::Instant::now();
-            while std::fs::read_link(&exe).ok().as_ref() != Some(&fake) && t.elapsed() < std::time::Duration::from_secs(10) {
+            while !started() && t.elapsed() < std::time::Duration::from_secs(10) {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
+            assert!(started(), "the fake program didn't start");
             let found = fuse_command(&point);
             let _ = c.kill();
             let _ = c.wait();
